@@ -11,13 +11,13 @@ import (
 )
 
 type scriptedWizard struct {
-	startNewProfile  model.Profile
-	startNewErr      error
-	editProfiles     []model.Profile
-	editErr          error
-	startNewCalls    int
-	startEditCalls   int
-	startEditInputs  []model.Profile
+	startNewProfile model.Profile
+	startNewErr     error
+	editProfiles    []model.Profile
+	editErr         error
+	startNewCalls   int
+	startEditCalls  int
+	startEditInputs []model.Profile
 }
 
 func (wizard *scriptedWizard) StartNew(context.Context) (model.Profile, error) {
@@ -65,7 +65,7 @@ func (validator *scriptedValidator) ValidateAndSave(_ context.Context, candidate
 		validator.errs = validator.errs[1:]
 	}
 	return report, err
-	}
+}
 
 type scriptedStore struct {
 	profile model.Profile
