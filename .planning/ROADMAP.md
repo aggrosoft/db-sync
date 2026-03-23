@@ -10,7 +10,7 @@ The MVP starts by establishing a reliable CLI foundation and saved profile model
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 1: Foundation CLI** - Establish the project structure, saved profile workflow, and connection validation basics.
+- [x] **Phase 1: Foundation CLI** - Establish the project structure, saved profile workflow, and connection validation basics.
 - [ ] **Phase 2: Schema And Dependency Discovery** - Introspect databases, analyze drift, and make table selection dependency-aware.
 - [ ] **Phase 3: Preflight Scan Engine** - Surface blockers and remediation guidance before any live writes occur.
 - [ ] **Phase 4: High-Throughput Sync Execution** - Implement dependency-safe large-scale sync behavior for inserts and mirror deletes.
@@ -27,12 +27,15 @@ The MVP starts by establishing a reliable CLI foundation and saved profile model
   1. Operator can start the CLI and create a reusable sync profile interactively.
   2. Operator can validate source and target connectivity before saving the profile.
   3. Profile data model is ready for later phases to extend with scan and sync options.
-**Plans**: 3 plans
+**Plans**: 6 plans
 
 Plans:
-- [ ] 01-01: Define CLI architecture, command layout, and profile persistence model
-- [ ] 01-02: Implement interactive profile setup and editing flow
-- [ ] 01-03: Implement connection validation and profile save/load behavior
+- [x] 01-01: Define CLI architecture, command layout, and profile persistence model
+- [x] 01-02: Implement interactive profile setup and editing flow
+- [x] 01-03: Implement connection validation and profile save/load behavior
+- [x] 01-04: Close the Windows root-command startup gap for wizard-first entry
+- [x] 01-05: Replace DSN-template authoring with a connection-first wizard flow
+- [x] 01-06: Persist and validate connection-first profiles with env-backed secrets
 
 ### Phase 2: Schema And Dependency Discovery
 **Goal**: Understand source and target schemas well enough to explain drift and table dependencies before sync planning.
@@ -117,7 +120,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation CLI | 0/3 | Not started | - |
+| 1. Foundation CLI | 6/6 | Complete | 2026-03-23 |
 | 2. Schema And Dependency Discovery | 0/3 | Not started | - |
 | 3. Preflight Scan Engine | 0/3 | Not started | - |
 | 4. High-Throughput Sync Execution | 0/4 | Not started | - |

@@ -12,11 +12,10 @@ Operators can understand what will happen before a sync runs and recover safely 
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Configure reusable source and target sync profiles from the CLI — validated in Phase 01
 
 ### Active
 
-- [ ] Configure reusable source and target sync profiles from the CLI
 - [ ] Detect schema drift and warn about unmapped or missing columns before writes begin
 - [ ] Discover table dependencies automatically and help operators pick only the tables they need
 - [ ] Run a preflight scan that reports rows or tables that cannot be written because of constraints or schema issues
@@ -40,6 +39,10 @@ Operators can understand what will happen before a sync runs and recover safely 
 - Saved profiles are part of v1 so operators can rerun established sync definitions.
 - Desired UX includes an interactive CLI setup flow, clear progress bars, colors, and readable summaries.
 - The target environment includes large tables, roughly 1 to 20 million rows per table.
+
+## Current State
+
+Phase 01 is complete. The CLI now supports a wizard-first root entrypoint, connection-first create/edit flows, env-backed profile persistence, compatibility with legacy template-based profiles, and save-gated validation for PostgreSQL and MySQL/MariaDB endpoints.
 
 ## Constraints
 
@@ -78,4 +81,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-23 after initialization*
+*Last updated: 2026-03-23 after Phase 01 gap closure and verification*
