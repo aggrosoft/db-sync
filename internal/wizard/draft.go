@@ -26,6 +26,7 @@ type ProfileDraft struct {
 	Name         string
 	Source       EndpointDraft
 	Target       EndpointDraft
+	Selection    model.Selection
 	SyncMode     string
 	MirrorDelete bool
 }
@@ -35,6 +36,7 @@ func NewDraft() ProfileDraft {
 	return ProfileDraft{
 		Source:       EndpointDraft{Mode: model.ConnectionModeConnectionString},
 		Target:       EndpointDraft{Mode: model.ConnectionModeConnectionString},
+		Selection:    profile.Selection,
 		SyncMode:     profile.Sync.Mode,
 		MirrorDelete: profile.Sync.MirrorDelete,
 	}
@@ -46,6 +48,7 @@ func FromProfile(profile model.Profile) ProfileDraft {
 		Name:         profile.Name,
 		Source:       endpointDraftFromProfile(profile.Name, "source", profile.Source),
 		Target:       endpointDraftFromProfile(profile.Name, "target", profile.Target),
+		Selection:    profile.Selection,
 		SyncMode:     profile.Sync.Mode,
 		MirrorDelete: profile.Sync.MirrorDelete,
 	}
@@ -55,6 +58,7 @@ func (draft ProfileDraft) ToProfile() model.Profile {
 	profile := model.DefaultProfile(draft.Name)
 	profile.Source = draft.Source.ToEndpoint(draft.Name, "source")
 	profile.Target = draft.Target.ToEndpoint(draft.Name, "target")
+	profile.Selection = draft.Selection
 	profile.Sync.Mode = draft.SyncMode
 	profile.Sync.MirrorDelete = draft.MirrorDelete
 	return profile.WithDefaults()

@@ -6,6 +6,7 @@ import (
 
 	"db-sync/internal/model"
 	profilepkg "db-sync/internal/profile"
+	"db-sync/internal/schema"
 )
 
 func TestDraftDefaults(t *testing.T) {
@@ -72,15 +73,25 @@ func TestReviewRendererShowsPlaceholdersAndSyncSettings(t *testing.T) {
 		Value:  "postgres://app:super-secret@localhost/target",
 		EnvVar: profilepkg.ConnectionStringEnvVar(profile.Name, "target"),
 	}
+	preview := schema.SelectionPreview{
+		ExplicitIncludes:  []schema.TableID{{Schema: "public", Name: "orders"}},
+		RequiredTables:    []schema.TableID{{Schema: "public", Name: "customers"}},
+		BlockedExclusions: []schema.BlockedExclusion{{Table: schema.TableID{Schema: "public", Name: "regions"}, RequiredBy: []schema.TableID{{Schema: "public", Name: "orders"}}}},
+		FinalTables:       []schema.TableID{{Schema: "public", Name: "customers"}, {Schema: "public", Name: "orders"}},
+		Blocked:           true,
+	}
 	profile.Sync.MirrorDelete = true
 
-	review := RenderReview(profile)
-	for _, want := range []string{profilepkg.PasswordEnvVar(profile.Name, "source"), profilepkg.ConnectionStringEnvVar(profile.Name, "target"), "mirror_delete=true", profilepkg.EnvFileName(profile.Name)} {
+	review := RenderReview(profile, &preview)
+	for _, want := range []string{profilepkg.PasswordEnvVar(profile.Name, "source"), profilepkg.ConnectionStringEnvVar(profile.Name, "target"), "mirror_delete=true", profilepkg.EnvFileName(profile.Name), "Explicit selections: public.orders", "Required additions: public.customers", "Blocked exclusions: public.regions (required by public.orders)"} {
 		if !strings.Contains(review, want) {
 			t.Fatalf("review output missing %q: %s", want, review)
 		}
 	}
 	if strings.Contains(review, "super-secret") {
 		t.Fatalf("review output leaked resolved secret: %s", review)
+	}
+	if strings.Contains(review, "Tables: [") {
+		t.Fatalf("review output still uses raw table slice formatting: %s", review)
 	}
 }

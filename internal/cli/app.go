@@ -12,6 +12,7 @@ import (
 	"db-sync/internal/db/postgres"
 	"db-sync/internal/model"
 	"db-sync/internal/profile"
+	"db-sync/internal/schema"
 	"db-sync/internal/secrets"
 	"db-sync/internal/validate"
 	"db-sync/internal/wizard"
@@ -34,6 +35,11 @@ type validationFailurePrompter func(context.Context, model.Profile, profile.Vali
 type WizardService interface {
 	StartNew(ctx context.Context) (model.Profile, error)
 	StartEdit(ctx context.Context, existing model.Profile) (model.Profile, error)
+	SelectTables(ctx context.Context, candidate model.Profile, discovery schema.DiscoveryReport) (model.Profile, error)
+}
+
+type SchemaDiscoverer interface {
+	DiscoverProfile(ctx context.Context, candidate model.Profile) (schema.DiscoveryReport, error)
 }
 
 type App struct {
@@ -42,6 +48,7 @@ type App struct {
 	stderr           io.Writer
 	store            profile.ProfileStore
 	validator        profile.ProfileValidator
+	discoverer       SchemaDiscoverer
 	wizard           WizardService
 	validationPrompt validationFailurePrompter
 	env              map[string]string
@@ -59,12 +66,19 @@ func NewApp(stdin io.Reader, stdout io.Writer, stderr io.Writer) *App {
 		validationPrompt: defaultValidationFailurePrompt(),
 	}
 	store := profile.NewFilesystemStore("", "db-sync")
+	postgresAdapter := postgres.NewAdapter()
+	mySQLAdapter := mysql.NewAdapter()
 	app.store = store
 	app.validator = validate.NewService(store, func() map[string]string { return app.Environment() }, validate.Registry{
-		model.EnginePostgres: postgres.NewAdapter(),
-		model.EngineMySQL:    mysql.NewAdapter(),
-		model.EngineMariaDB:  mysql.NewAdapter(),
+		model.EnginePostgres: postgresAdapter,
+		model.EngineMySQL:    mySQLAdapter,
+		model.EngineMariaDB:  mySQLAdapter,
 	})
+	app.discoverer = schema.NewService(func() map[string]string { return app.Environment() }, schema.Registry{
+		model.EnginePostgres: postgresAdapter,
+		model.EngineMySQL:    mySQLAdapter,
+		model.EngineMariaDB:  mySQLAdapter,
+	}, validate.ResolveEndpoint)
 	app.wizard = wizard.NewService(stdout)
 	return app
 }
@@ -75,6 +89,10 @@ func (app *App) SetStore(store profile.ProfileStore) {
 
 func (app *App) SetValidator(validator profile.ProfileValidator) {
 	app.validator = validator
+}
+
+func (app *App) SetDiscoverer(discoverer SchemaDiscoverer) {
+	app.discoverer = discoverer
 }
 
 func (app *App) SetWizard(wizard WizardService) {
@@ -197,7 +215,59 @@ func (app *App) SaveReviewedProfile(ctx context.Context, profileDraft model.Prof
 
 func (app *App) runInteractiveSaveLoop(ctx context.Context, profileDraft model.Profile) error {
 	current := profileDraft
+	selectionApplied := false
 	for {
+		if !selectionApplied {
+			report, err := app.validator.ValidateProfile(ctx, current)
+			if err != nil {
+				if renderErr := RenderValidationReport(app.stdout, report); renderErr != nil {
+					return renderErr
+				}
+				if !report.Blocked || app.validationPrompt == nil {
+					return err
+				}
+				action, promptErr := app.validationPrompt(ctx, current, report)
+				if promptErr != nil {
+					if errors.Is(promptErr, context.Canceled) {
+						return nil
+					}
+					return promptErr
+				}
+				switch action {
+				case validationFailureRetry:
+					continue
+				case validationFailureModify:
+					updated, editErr := app.wizard.StartEdit(ctx, current)
+					if editErr != nil {
+						if errors.Is(editErr, context.Canceled) {
+							return nil
+						}
+						return editErr
+					}
+					current = updated
+					continue
+				case validationFailureCancel:
+					return nil
+				default:
+					return fmt.Errorf("unsupported validation action %q", action)
+				}
+			}
+			if app.discoverer != nil && app.wizard != nil {
+				discovery, err := app.discoverer.DiscoverProfile(ctx, current)
+				if err != nil {
+					return err
+				}
+				updated, err := app.wizard.SelectTables(ctx, current, discovery)
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return nil
+					}
+					return err
+				}
+				current = updated
+			}
+			selectionApplied = true
+		}
 		report, err := app.validateAndRenderReviewedProfile(ctx, current)
 		if err == nil {
 			return nil
@@ -214,6 +284,7 @@ func (app *App) runInteractiveSaveLoop(ctx context.Context, profileDraft model.P
 		}
 		switch action {
 		case validationFailureRetry:
+			selectionApplied = false
 			continue
 		case validationFailureModify:
 			updated, editErr := app.wizard.StartEdit(ctx, current)
@@ -224,6 +295,7 @@ func (app *App) runInteractiveSaveLoop(ctx context.Context, profileDraft model.P
 				return editErr
 			}
 			current = updated
+			selectionApplied = false
 		case validationFailureCancel:
 			return nil
 		default:

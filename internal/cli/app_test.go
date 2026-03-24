@@ -8,6 +8,7 @@ import (
 
 	"db-sync/internal/model"
 	"db-sync/internal/profile"
+	"db-sync/internal/schema"
 )
 
 type scriptedWizard struct {
@@ -42,6 +43,10 @@ func (wizard *scriptedWizard) StartEdit(_ context.Context, existing model.Profil
 	return profile, nil
 }
 
+func (wizard *scriptedWizard) SelectTables(_ context.Context, candidate model.Profile, _ schema.DiscoveryReport) (model.Profile, error) {
+	return candidate, nil
+}
+
 type scriptedValidator struct {
 	reports []profile.ValidationReport
 	errs    []error
@@ -70,6 +75,15 @@ func (validator *scriptedValidator) ValidateAndSave(_ context.Context, candidate
 type scriptedStore struct {
 	profile model.Profile
 	err     error
+}
+
+type scriptedDiscoverer struct {
+	report schema.DiscoveryReport
+	err    error
+}
+
+func (discoverer scriptedDiscoverer) DiscoverProfile(context.Context, model.Profile) (schema.DiscoveryReport, error) {
+	return discoverer.report, discoverer.err
 }
 
 func (store scriptedStore) Save(context.Context, model.Profile) (string, error) {
@@ -105,6 +119,7 @@ func TestStartInteractiveProfileRetriesBlockedValidation(t *testing.T) {
 	app := NewApp(bytes.NewBuffer(nil), stdout, &bytes.Buffer{})
 	app.SetWizard(wizard)
 	app.SetValidator(validator)
+	app.SetDiscoverer(scriptedDiscoverer{})
 	app.SetValidationFailurePrompt(func(context.Context, model.Profile, profile.ValidationReport) (validationFailureAction, error) {
 		return validationFailureRetry, nil
 	})
@@ -144,6 +159,7 @@ func TestRunProfileEditAllowsModifyAfterBlockedValidation(t *testing.T) {
 	app.SetStore(scriptedStore{profile: existing})
 	app.SetWizard(wizard)
 	app.SetValidator(validator)
+	app.SetDiscoverer(scriptedDiscoverer{})
 	app.SetValidationFailurePrompt(func(context.Context, model.Profile, profile.ValidationReport) (validationFailureAction, error) {
 		return validationFailureModify, nil
 	})

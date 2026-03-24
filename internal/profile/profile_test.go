@@ -14,6 +14,8 @@ func TestProfileYAMLRoundTripPreservesDefaults(t *testing.T) {
 	original.Source.DSNTemplate = "postgres://app:${SRC_DB_PASSWORD}@localhost:5432/source?sslmode=disable"
 	original.Target.Engine = model.EnginePostgres
 	original.Target.DSNTemplate = "postgres://app:${TGT_DB_PASSWORD}@localhost:5432/target?sslmode=disable"
+	original.Selection.Tables = []string{"public.orders", "public.order_items"}
+	original.Selection.ExcludedTables = []string{"public.customers"}
 
 	encoded, err := MarshalProfile(original)
 	if err != nil {

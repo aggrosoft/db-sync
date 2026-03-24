@@ -49,7 +49,8 @@ type Endpoint struct {
 }
 
 type Selection struct {
-	Tables []string `yaml:"tables"`
+	Tables         []string `yaml:"tables"`
+	ExcludedTables []string `yaml:"excluded_tables,omitempty"`
 }
 
 type SyncOptions struct {
@@ -71,7 +72,8 @@ func DefaultProfile(name string) Profile {
 		Version: CurrentProfileVersion,
 		Name:    name,
 		Selection: Selection{
-			Tables: []string{},
+			Tables:         []string{},
+			ExcludedTables: []string{},
 		},
 		Sync: SyncOptions{
 			Mode:         SyncModeInsertMissing,
@@ -88,6 +90,9 @@ func (p Profile) WithDefaults() Profile {
 	p.Target = p.Target.WithDefaults()
 	if p.Selection.Tables == nil {
 		p.Selection.Tables = []string{}
+	}
+	if p.Selection.ExcludedTables == nil {
+		p.Selection.ExcludedTables = []string{}
 	}
 	if p.Sync.Mode == "" {
 		p.Sync.Mode = SyncModeInsertMissing

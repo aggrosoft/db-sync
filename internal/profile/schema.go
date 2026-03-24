@@ -48,7 +48,26 @@ func NormalizeProfile(profile model.Profile) (model.Profile, error) {
 	if err != nil {
 		return model.Profile{}, err
 	}
+	profile.Selection.Tables = normalizeSelectionValues(profile.Selection.Tables)
+	profile.Selection.ExcludedTables = normalizeSelectionValues(profile.Selection.ExcludedTables)
 	return profile, nil
+}
+
+func normalizeSelectionValues(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized
 }
 
 func normalizeEndpoint(profileName string, role string, endpoint model.Endpoint) (model.Endpoint, error) {

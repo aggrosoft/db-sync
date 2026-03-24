@@ -11,6 +11,7 @@ import (
 
 	"db-sync/internal/model"
 	"db-sync/internal/profile"
+	"db-sync/internal/schema"
 )
 
 type fakeWizard struct {
@@ -29,6 +30,16 @@ func (wizard *fakeWizard) StartNew(context.Context) (model.Profile, error) {
 
 func (wizard *fakeWizard) StartEdit(context.Context, model.Profile) (model.Profile, error) {
 	return model.Profile{}, errors.New("unexpected StartEdit call")
+}
+
+func (wizard *fakeWizard) SelectTables(context.Context, model.Profile, schema.DiscoveryReport) (model.Profile, error) {
+	return wizard.profile, nil
+}
+
+type fakeDiscoverer struct{}
+
+func (fakeDiscoverer) DiscoverProfile(context.Context, model.Profile) (schema.DiscoveryReport, error) {
+	return schema.DiscoveryReport{}, nil
 }
 
 type fakeValidator struct{}
@@ -142,6 +153,7 @@ func TestRootCommandNoArgsStartsWizardWhenInteractive(t *testing.T) {
 	app.SetWizard(wizard)
 	app.SetValidator(fakeValidator{})
 	app.SetStore(fakeStore{})
+	app.SetDiscoverer(fakeDiscoverer{})
 
 	cmd := NewRootCommand(app)
 	cmd.SetArgs([]string{})
@@ -163,6 +175,7 @@ func TestRootCommandNoArgsFallsBackToHelpWhenNonInteractive(t *testing.T) {
 	app := NewApp(fakeReader{info: fakeFileInfo{mode: 0}}, stdout, &bytes.Buffer{})
 	app.SetWizard(&fakeWizard{profile: model.DefaultProfile("ignored")})
 	app.SetValidator(fakeValidator{})
+	app.SetDiscoverer(nil)
 
 	cmd := NewRootCommand(app)
 	cmd.SetOut(stdout)

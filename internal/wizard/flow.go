@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"db-sync/internal/model"
 	profilepkg "db-sync/internal/profile"
+	"db-sync/internal/schema"
 
 	"github.com/charmbracelet/huh"
 )
@@ -26,6 +28,60 @@ func (service *Service) StartNew(ctx context.Context) (model.Profile, error) {
 
 func (service *Service) StartEdit(ctx context.Context, existing model.Profile) (model.Profile, error) {
 	return service.run(ctx, FromProfile(existing))
+}
+
+func (service *Service) SelectTables(ctx context.Context, profile model.Profile, discovery schema.DiscoveryReport) (model.Profile, error) {
+	graph := schema.BuildDependencyGraph(discovery.Source.Snapshot)
+	selectedInput := strings.Join(profile.Selection.Tables, ", ")
+	excludedInput := strings.Join(profile.Selection.ExcludedTables, ", ")
+	for {
+		if service.output != nil && len(discovery.Source.Snapshot.Tables) > 0 {
+			available := make([]string, 0, len(discovery.Source.Snapshot.Tables))
+			for _, table := range discovery.Source.Snapshot.Tables {
+				available = append(available, table.ID.String())
+			}
+			if _, err := fmt.Fprintf(service.output, "Discovered source tables: %s\n", strings.Join(available, ", ")); err != nil {
+				return model.Profile{}, err
+			}
+		}
+
+		selectionForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().Title("Selected tables").Description(FutureTablesHelp).Value(&selectedInput),
+				huh.NewInput().Title("Excluded required tables").Description(TableExclusionHelp).Value(&excludedInput),
+			),
+		).WithAccessible(true)
+		if err := selectionForm.RunWithContext(ctx); err != nil {
+			return model.Profile{}, err
+		}
+
+		updated := profile.WithDefaults()
+		updated.Selection.Tables = schema.ParseSelectionInput(selectedInput)
+		updated.Selection.ExcludedTables = schema.ParseSelectionInput(excludedInput)
+		preview, err := schema.PreviewSelection(graph, updated.Selection.Tables, updated.Selection.ExcludedTables)
+		if err != nil {
+			if service.output != nil {
+				if _, writeErr := fmt.Fprintf(service.output, "Selection error: %v\n", err); writeErr != nil {
+					return model.Profile{}, writeErr
+				}
+			}
+			continue
+		}
+		if service.output != nil {
+			if _, err := fmt.Fprintln(service.output, RenderReview(updated, &preview)); err != nil {
+				return model.Profile{}, err
+			}
+		}
+		approved := false
+		confirm := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title("Save this reviewed profile?").Value(&approved))).WithAccessible(true)
+		if err := confirm.RunWithContext(ctx); err != nil {
+			return model.Profile{}, err
+		}
+		if !approved {
+			return model.Profile{}, context.Canceled
+		}
+		return updated, nil
+	}
 }
 
 func (service *Service) run(ctx context.Context, draft ProfileDraft) (model.Profile, error) {
@@ -48,21 +104,7 @@ func (service *Service) run(ctx context.Context, draft ProfileDraft) (model.Prof
 	if err := syncForm.RunWithContext(ctx); err != nil {
 		return model.Profile{}, err
 	}
-	profile := draft.ToProfile()
-	if service.output != nil {
-		if _, err := fmt.Fprintln(service.output, RenderReview(profile)); err != nil {
-			return model.Profile{}, err
-		}
-	}
-	approved := false
-	confirm := huh.NewForm(huh.NewGroup(huh.NewConfirm().Title("Save this reviewed profile?").Value(&approved))).WithAccessible(true)
-	if err := confirm.RunWithContext(ctx); err != nil {
-		return model.Profile{}, err
-	}
-	if !approved {
-		return model.Profile{}, context.Canceled
-	}
-	return profile, nil
+	return draft.ToProfile(), nil
 }
 
 func (service *Service) captureEndpoint(ctx context.Context, profileName string, title string, role string, draft *EndpointDraft) error {

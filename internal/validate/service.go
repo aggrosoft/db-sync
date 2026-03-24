@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"sort"
 
 	"db-sync/internal/model"
 	"db-sync/internal/profile"
 	"db-sync/internal/secrets"
-
-	mysqlcfg "github.com/go-sql-driver/mysql"
 )
 
 type Adapter interface {
@@ -49,9 +46,9 @@ func (service *Service) ValidateProfile(ctx context.Context, candidate model.Pro
 		}
 	}
 	env := service.envProvider()
-	sourceDSN, sourceMissing, err := resolveEndpoint(normalized.Source, env)
+	sourceDSN, sourceMissing, err := ResolveEndpoint(normalized.Source, env)
 	sourceErr := err
-	targetDSN, targetMissing, err := resolveEndpoint(normalized.Target, env)
+	targetDSN, targetMissing, err := ResolveEndpoint(normalized.Target, env)
 	targetErr := err
 	if sourceErr != nil || targetErr != nil {
 		missing := dedupe(append(sourceMissing, targetMissing...))
@@ -110,59 +107,6 @@ func (service *Service) adapterFor(engine model.Engine) (Adapter, error) {
 
 func blockedReport(source profile.EndpointValidation, target profile.EndpointValidation, err error) profile.ValidationReport {
 	return profile.ValidationReport{Source: source, Target: target, Blocked: true, Summary: err.Error()}
-}
-
-func resolveEndpoint(endpoint model.Endpoint, env map[string]string) (string, []string, error) {
-	switch endpoint.EffectiveConnectionMode() {
-	case model.ConnectionModeLegacyTemplate:
-		resolved, err := secrets.ResolveTemplate(endpoint.DSNTemplate, env)
-		if err != nil {
-			return "", resolved.Missing(), err
-		}
-		return resolved.Value(), nil, nil
-	case model.ConnectionModeConnectionString:
-		value := firstConfiguredValue(env[endpoint.Connection.ConnectionString.EnvVar], endpoint.Connection.ConnectionString.Value)
-		if value == "" {
-			return "", []string{endpoint.Connection.ConnectionString.EnvVar}, fmt.Errorf("missing required environment variables: %s", endpoint.Connection.ConnectionString.EnvVar)
-		}
-		return value, nil, nil
-	case model.ConnectionModeDetails:
-		password := firstConfiguredValue(env[endpoint.Connection.Details.PasswordEnv], endpoint.Connection.Details.Password)
-		if password == "" {
-			return "", []string{endpoint.Connection.Details.PasswordEnv}, fmt.Errorf("missing required environment variables: %s", endpoint.Connection.Details.PasswordEnv)
-		}
-		return buildDetailsDSN(endpoint, password)
-	default:
-		return "", nil, errors.New("unsupported connection mode")
-	}
-}
-
-func buildDetailsDSN(endpoint model.Endpoint, password string) (string, []string, error) {
-	details := endpoint.Connection.Details
-	switch endpoint.Engine {
-	case model.EnginePostgres:
-		query := url.Values{}
-		if details.SSLMode != "" {
-			query.Set("sslmode", details.SSLMode)
-		}
-		return (&url.URL{
-			Scheme:   "postgres",
-			User:     url.UserPassword(details.Username, password),
-			Host:     fmt.Sprintf("%s:%d", details.Host, details.Port),
-			Path:     details.Database,
-			RawQuery: query.Encode(),
-		}).String(), nil, nil
-	case model.EngineMySQL, model.EngineMariaDB:
-		cfg := mysqlcfg.NewConfig()
-		cfg.User = details.Username
-		cfg.Passwd = password
-		cfg.Net = "tcp"
-		cfg.Addr = fmt.Sprintf("%s:%d", details.Host, details.Port)
-		cfg.DBName = details.Database
-		return cfg.FormatDSN(), nil, nil
-	default:
-		return "", nil, fmt.Errorf("unsupported engine %q", endpoint.Engine)
-	}
 }
 
 func policyFailureReport(role string, engine model.Engine, err error) profile.ValidationReport {
