@@ -1,26 +1,20 @@
 ---
-status: partial
+status: complete
 phase: 01-foundation-cli
 source: [01-01-SUMMARY.md, 01-02-SUMMARY.md, 01-03-SUMMARY.md, 01-04-SUMMARY.md, 01-05-SUMMARY.md, 01-06-SUMMARY.md]
 started: 2026-03-23T10:15:00Z
-updated: 2026-03-23T11:31:10Z
+updated: 2026-03-25T08:49:13.0885671+01:00
 ---
 
 ## Current Test
 
-number: none
-name: Manual Retest Pending
-expected: |
-  Re-run Test 1 and Test 4 after the validation-recovery fix is verified manually. The wizard should stay interactive on blocked validation and offer retry, modify, or cancel before the successful save path is rechecked.
-awaiting: next iteration
+[testing complete]
 
 ## Tests
 
 ### 1. Wizard Fast-Path New Profile Flow
 expected: Run `go run ./cmd/db-sync` in an interactive terminal. The CLI should enter the wizard instead of printing help, move through a short fast-path flow, and reach a review-before-save step that clearly shows the profile name, engines, placeholder-based DSN templates, empty table selection, and sync settings before asking for final save confirmation.
-result: issue
-reported: "program exits hard when wrong connection details are entered; it must ask to retry / modify / cancel."
-severity: blocker
+result: pass
 
 ### 2. Edit Flow Prefill Behavior
 expected: After saving a profile, run `go run ./cmd/db-sync profile edit <name>`. The same wizard should reopen with the existing profile name, source engine, target engine, DSN templates, sync mode, and mirror-delete setting already populated.
@@ -32,18 +26,16 @@ result: pass
 
 ### 4. Successful Validate-And-Save Flow
 expected: With reachable PostgreSQL or MySQL endpoints and placeholder-backed credentials available, completing the wizard and confirming save should validate both endpoints, persist the profile under the user config directory, and keep `${NAME}` placeholders in the YAML file rather than raw secrets.
-result: blocked
-reason: "Blocked by Test 1; recheck in next iteration."
-blocked_by: 1
+result: pass
 
 ## Summary
 
 total: 4
-passed: 2
-issues: 1
+passed: 4
+issues: 0
 pending: 0
 skipped: 0
-blocked: 1
+blocked: 0
 
 ## Gaps
 - truth: "Running `go run ./cmd/db-sync` in an interactive terminal enters the wizard instead of printing help and reaches the review-before-save step."
@@ -60,8 +52,8 @@ blocked: 1
   missing: []
   debug_session: ".planning/debug/phase-1-uat-help-no-wizard.md"
 - truth: "When validation fails because connection details are wrong, the interactive flow lets the operator retry, modify the details, or cancel instead of hard-stopping the program."
-  status: failed
-  reason: "User reported: program exits hard when wrong connection details are entered; it must ask to retry / modify / cancel."
+  status: resolved
+  reason: "Manual retest passed on 2026-03-25. The wizard now stays interactive on blocked validation, offers retry / modify / cancel, and allows the successful validate-and-save path to complete afterward."
   severity: blocker
   test: 1
   root_cause: "The interactive create/edit commands returned blocked `ValidateAndSave` errors directly from `internal/cli/app.go`, so Cobra exited the command after printing the validation report instead of keeping the operator inside the wizard with a recovery choice."
