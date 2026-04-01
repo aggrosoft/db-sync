@@ -1,9 +1,6 @@
 package model
 
-const (
-	CurrentProfileVersion = 1
-	SyncModeInsertMissing = "insert-missing"
-)
+const CurrentProfileVersion = 1
 
 type ConnectionMode string
 
@@ -52,8 +49,7 @@ type Selection struct {
 }
 
 type SyncOptions struct {
-	Mode         string `yaml:"mode"`
-	MirrorDelete bool   `yaml:"mirror_delete"`
+	MirrorDelete bool `yaml:"mirror_delete"`
 }
 
 type Profile struct {
@@ -74,7 +70,6 @@ func DefaultProfile(name string) Profile {
 			ExcludedTables: []string{},
 		},
 		Sync: SyncOptions{
-			Mode:         SyncModeInsertMissing,
 			MirrorDelete: false,
 		},
 	}
@@ -91,9 +86,6 @@ func (p Profile) WithDefaults() Profile {
 	}
 	if p.Selection.ExcludedTables == nil {
 		p.Selection.ExcludedTables = []string{}
-	}
-	if p.Sync.Mode == "" {
-		p.Sync.Mode = SyncModeInsertMissing
 	}
 	return p
 }

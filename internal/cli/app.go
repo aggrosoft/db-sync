@@ -13,6 +13,7 @@ import (
 	"db-sync/internal/profile"
 	"db-sync/internal/schema"
 	"db-sync/internal/secrets"
+	syncapp "db-sync/internal/sync"
 	"db-sync/internal/validate"
 )
 
@@ -20,11 +21,40 @@ type SchemaDiscoverer interface {
 	DiscoverProfile(ctx context.Context, candidate model.Profile) (schema.DiscoveryReport, error)
 }
 
+type SyncRunner interface {
+	RunProfile(ctx context.Context, candidate model.Profile, analysis interface {
+		SelectionPreview() schema.SelectionPreview
+		DiscoveryReport() schema.DiscoveryReport
+		DriftReport() schema.DriftReport
+	}, dryRun bool, progress func(syncapp.ProgressUpdate)) (syncapp.Report, error)
+}
+
+type Analysis struct {
+	Candidate  model.Profile
+	Validation profile.ValidationReport
+	Discovery  schema.DiscoveryReport
+	Preview    schema.SelectionPreview
+	Drift      schema.DriftReport
+}
+
+func (analysis Analysis) SelectionPreview() schema.SelectionPreview {
+	return analysis.Preview
+}
+
+func (analysis Analysis) DiscoveryReport() schema.DiscoveryReport {
+	return analysis.Discovery
+}
+
+func (analysis Analysis) DriftReport() schema.DriftReport {
+	return analysis.Drift
+}
+
 type App struct {
 	stdout     io.Writer
 	stderr     io.Writer
 	validator  profile.ProfileValidator
 	discoverer SchemaDiscoverer
+	runner     SyncRunner
 	env        map[string]string
 }
 
@@ -46,6 +76,7 @@ func NewApp(stdout io.Writer, stderr io.Writer) *App {
 		model.EngineMySQL:    mySQLAdapter,
 		model.EngineMariaDB:  mySQLAdapter,
 	}, validate.ResolveEndpoint)
+	app.runner = syncapp.NewService(func() map[string]string { return app.Environment() })
 	return app
 }
 
@@ -55,6 +86,10 @@ func (app *App) SetValidator(validator profile.ProfileValidator) {
 
 func (app *App) SetDiscoverer(discoverer SchemaDiscoverer) {
 	app.discoverer = discoverer
+}
+
+func (app *App) SetRunner(runner SyncRunner) {
+	app.runner = runner
 }
 
 func (app *App) SetEnvironment(env map[string]string) {
@@ -87,45 +122,117 @@ func (app *App) Environment() map[string]string {
 	return copyEnv
 }
 
-func (app *App) RunFromEnvironment(ctx context.Context) error {
+func (app *App) AnalyzeFromEnvironment(ctx context.Context) error {
+	analysis, err := app.analyzeEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+	if err := app.renderAnalysis(analysis); err != nil {
+		return err
+	}
+	if len(analysis.Drift.Blockers) > 0 {
+		return errors.New("schema drift blocks sync for one or more selected tables")
+	}
+	return nil
+}
+
+func (app *App) RunFromEnvironment(ctx context.Context, dryRun bool) error {
 	if app.validator == nil {
 		return errors.New("profile validator is not configured")
 	}
 	if app.discoverer == nil {
 		return errors.New("schema discoverer is not configured")
 	}
-	candidate, err := LoadProfileFromEnvironment(app.Environment())
+	if app.runner == nil {
+		return errors.New("sync runner is not configured")
+	}
+	analysis, err := app.analyzeEnvironment(ctx)
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(app.stdout, "Loaded configuration from environment."); err != nil {
-		return err
+	if len(analysis.Drift.Blockers) > 0 {
+		if err := app.renderAnalysis(analysis); err != nil {
+			return err
+		}
+		return errors.New("schema drift blocks sync for one or more selected tables")
 	}
-	report, err := app.validator.ValidateProfile(ctx, candidate)
-	if renderErr := RenderValidationReport(app.stdout, report); renderErr != nil {
+	progress := newRunProgressBar(app.stderr, len(analysis.Preview.FinalTables), dryRun)
+	defer progress.Finish()
+	report, err := app.runner.RunProfile(ctx, analysis.Candidate, analysis, dryRun, progress.Advance)
+	if renderErr := RenderSyncReport(app.stdout, report); renderErr != nil {
 		return renderErr
 	}
 	if err != nil {
 		return err
-	}
-	discovery, err := app.discoverer.DiscoverProfile(ctx, candidate)
-	if renderErr := RenderDiscoveryReport(app.stdout, discovery); renderErr != nil {
-		return renderErr
-	}
-	if err != nil {
-		return err
-	}
-	preview, err := PreviewConfiguredSelection(candidate, discovery)
-	if err != nil {
-		return err
-	}
-	if err := RenderSelectionPreview(app.stdout, candidate, preview); err != nil {
-		return err
-	}
-	if preview.Blocked {
-		return errors.New("table selection is blocked by required exclusions")
 	}
 	return nil
+}
+
+func (app *App) analyzeEnvironment(ctx context.Context) (Analysis, error) {
+	if app.validator == nil {
+		return Analysis{}, errors.New("profile validator is not configured")
+	}
+	if app.discoverer == nil {
+		return Analysis{}, errors.New("schema discoverer is not configured")
+	}
+	candidate, err := LoadProfileFromEnvironment(app.Environment())
+	if err != nil {
+		return Analysis{}, err
+	}
+	validationReport, err := app.validator.ValidateProfile(ctx, candidate)
+	if err != nil {
+		return Analysis{Candidate: candidate, Validation: validationReport}, err
+	}
+	discoveryReport, err := app.discoverer.DiscoverProfile(ctx, candidate)
+	if err != nil {
+		return Analysis{Candidate: candidate, Validation: validationReport, Discovery: discoveryReport}, err
+	}
+	preview, err := PreviewConfiguredSelection(candidate, discoveryReport)
+	if err != nil {
+		return Analysis{Candidate: candidate, Validation: validationReport, Discovery: discoveryReport}, err
+	}
+	drift := schema.CompareSnapshots(
+		filterSnapshotToTables(discoveryReport.Source.Snapshot, preview.FinalTables),
+		filterSnapshotToTables(discoveryReport.Target.Snapshot, preview.FinalTables),
+	)
+	drift = schema.RelaxReportForSelection(preview, drift)
+	return Analysis{
+		Candidate:  candidate,
+		Validation: validationReport,
+		Discovery:  discoveryReport,
+		Preview:    preview,
+		Drift:      drift,
+	}, nil
+}
+
+func (app *App) renderAnalysis(analysis Analysis) error {
+	if err := RenderSelectionPreview(app.stdout, analysis.Candidate, analysis.Preview, analysis.Drift); err != nil {
+		return err
+	}
+	if err := RenderDriftReport(app.stdout, analysis.Preview, analysis.Drift); err != nil {
+		return err
+	}
+	return nil
+}
+
+func filterSnapshotToTables(snapshot schema.Snapshot, tableIDs []schema.TableID) schema.Snapshot {
+	if len(tableIDs) == 0 {
+		snapshot.Tables = []schema.Table{}
+		return snapshot
+	}
+	selected := make(map[schema.TableID]struct{}, len(tableIDs))
+	for _, tableID := range tableIDs {
+		selected[tableID] = struct{}{}
+	}
+	filtered := make([]schema.Table, 0, len(tableIDs))
+	for _, table := range snapshot.Tables {
+		if _, ok := selected[table.ID]; !ok {
+			continue
+		}
+		filtered = append(filtered, table)
+	}
+	snapshot.Tables = filtered
+	return schema.NormalizeSnapshot(snapshot)
 }
 
 func RenderValidationReport(writer io.Writer, report profile.ValidationReport) error {

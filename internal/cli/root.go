@@ -6,11 +6,12 @@ import (
 
 func NewRootCommand(app *App) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "db-sync",
-		Short:   "Validate database sync configuration from environment variables",
-		Example: "db-sync --env-file .env",
+		Use:          "db-sync",
+		Short:        "Analyze and run database sync operations from environment variables",
+		Example:      "db-sync analyze --env-file .env\ndb-sync run --dry-run --env-file .env",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return app.RunFromEnvironment(cmd.Context())
+			return cmd.Help()
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			envFile, err := cmd.Flags().GetString("env-file")
@@ -21,5 +22,33 @@ func NewRootCommand(app *App) *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().String("env-file", "", "Path to a .env file containing DB_SYNC_* settings")
+	cmd.AddCommand(newAnalyzeCommand(app))
+	cmd.AddCommand(newRunCommand(app))
+	return cmd
+}
+
+func newAnalyzeCommand(app *App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "analyze",
+		Short: "Compare the selected source and target schemas",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return app.AnalyzeFromEnvironment(cmd.Context())
+		},
+	}
+}
+
+func newRunCommand(app *App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Execute the configured sync",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dryRun, err := cmd.Flags().GetBool("dry-run")
+			if err != nil {
+				return err
+			}
+			return app.RunFromEnvironment(cmd.Context(), dryRun)
+		},
+	}
+	cmd.Flags().Bool("dry-run", false, "Preview inserts without writing to the target database")
 	return cmd
 }

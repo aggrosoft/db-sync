@@ -28,6 +28,7 @@ const (
 
 	tablesKey        = "DB_SYNC_TABLES"
 	excludeTablesKey = "DB_SYNC_EXCLUDE_TABLES"
+	mirrorDeleteKey  = "DB_SYNC_MIRROR_DELETE"
 )
 
 func LoadProfileFromEnvironment(env map[string]string) (model.Profile, error) {
@@ -49,6 +50,11 @@ func LoadProfileFromEnvironment(env map[string]string) (model.Profile, error) {
 	candidate.Target = target
 	candidate.Selection.Tables = schema.ParseSelectionInput(env[tablesKey])
 	candidate.Selection.ExcludedTables = schema.ParseSelectionInput(env[excludeTablesKey])
+	mirrorDelete, err := parseBool(env[mirrorDeleteKey], false, mirrorDeleteKey)
+	if err != nil {
+		return model.Profile{}, err
+	}
+	candidate.Sync.MirrorDelete = mirrorDelete
 	return profile.NormalizeProfile(candidate)
 }
 
@@ -128,6 +134,21 @@ func parsePort(value string, fallback int, key string) (int, error) {
 		return 0, fmt.Errorf("invalid port in %s: must be greater than zero", key)
 	}
 	return port, nil
+}
+
+func parseBool(value string, fallback bool, key string) (bool, error) {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	if trimmed == "" {
+		return fallback, nil
+	}
+	switch trimmed {
+	case "1", "true", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean in %s: %q", key, value)
+	}
 }
 
 func defaultPortForEngine(engine model.Engine) int {

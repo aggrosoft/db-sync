@@ -20,7 +20,8 @@ func TestLoadProfileFromEnvironmentMatchesDotEnvContract(t *testing.T) {
 		"DB_SYNC_TARGET_PASSWORD": "dev",
 		"DB_SYNC_TARGET_DB":       "db",
 		"DB_SYNC_TABLES":          "users,orders",
-		"DB_SYNC_EXCLUDE_TABLES":  "logs",
+		"DB_SYNC_EXCLUDE_TABLES":  "logs, audit_log ",
+		"DB_SYNC_MIRROR_DELETE":   "true",
 	})
 	if err != nil {
 		t.Fatalf("LoadProfileFromEnvironment() error = %v", err)
@@ -40,8 +41,11 @@ func TestLoadProfileFromEnvironmentMatchesDotEnvContract(t *testing.T) {
 	if got, want := strings.Join(loaded.Selection.Tables, ","), "users,orders"; got != want {
 		t.Fatalf("selection tables = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(loaded.Selection.ExcludedTables, ","), "logs"; got != want {
-		t.Fatalf("selection exclusions = %q, want %q", got, want)
+	if got, want := strings.Join(loaded.Selection.ExcludedTables, ","), "logs,audit_log"; got != want {
+		t.Fatalf("excluded tables = %q, want %q", got, want)
+	}
+	if !loaded.Sync.MirrorDelete {
+		t.Fatal("mirror delete = false, want true")
 	}
 }
 
@@ -57,5 +61,27 @@ func TestLoadProfileFromEnvironmentRejectsMissingVariables(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "DB_SYNC_TARGET_HOST") {
 		t.Fatalf("error = %q, want target env keys", err.Error())
+	}
+}
+
+func TestLoadProfileFromEnvironmentRejectsInvalidMirrorDelete(t *testing.T) {
+	_, err := LoadProfileFromEnvironment(map[string]string{
+		"DB_SYNC_SOURCE_HOST":     "localhost",
+		"DB_SYNC_SOURCE_PORT":     "3306",
+		"DB_SYNC_SOURCE_USER":     "dev",
+		"DB_SYNC_SOURCE_PASSWORD": "dev",
+		"DB_SYNC_SOURCE_DB":       "db",
+		"DB_SYNC_TARGET_HOST":     "localhost",
+		"DB_SYNC_TARGET_PORT":     "3307",
+		"DB_SYNC_TARGET_USER":     "dev",
+		"DB_SYNC_TARGET_PASSWORD": "dev",
+		"DB_SYNC_TARGET_DB":       "db",
+		"DB_SYNC_MIRROR_DELETE":   "maybe",
+	})
+	if err == nil {
+		t.Fatal("LoadProfileFromEnvironment() error = nil, want invalid mirror delete error")
+	}
+	if !strings.Contains(err.Error(), "invalid boolean") {
+		t.Fatalf("error = %q, want boolean error", err.Error())
 	}
 }

@@ -2,9 +2,13 @@ package schema
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
+
+var nativeTypePattern = regexp.MustCompile(`^([a-z ]+)(?:\((\d+).*)?$`)
 
 type Classification string
 
@@ -283,15 +287,122 @@ func cloneColumn(column Column) *Column {
 }
 
 func mismatchedColumnType(source Column, target Column) bool {
+	if compatibleColumnTypes(source, target) {
+		return false
+	}
 	if canonicalType(source.DataType) != canonicalType(target.DataType) {
 		return true
 	}
-	if canonicalType(source.NativeType) != canonicalType(target.NativeType) {
+	return canonicalType(source.NativeType) != canonicalType(target.NativeType)
+}
+
+func canonicalType(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func compatibleColumnTypes(source Column, target Column) bool {
+	if sameStringFamilyWithWiderTarget(source, target) {
+		return true
+	}
+	if numericTypeCanWiden(source, target) {
+		return true
+	}
+	return canonicalType(source.DataType) == canonicalType(target.DataType) && canonicalType(source.NativeType) == canonicalType(target.NativeType)
+}
+
+func sameStringFamilyWithWiderTarget(source Column, target Column) bool {
+	sourceBase, sourceSize := parseNativeType(source.NativeType)
+	targetBase, targetSize := parseNativeType(target.NativeType)
+	if !isStringType(sourceBase) || !isStringType(targetBase) {
+		return false
+	}
+	if sourceBase == "text" || targetBase == "text" {
+		return textTypeRank(targetBase) >= textTypeRank(sourceBase)
+	}
+	if sourceSize == 0 || targetSize == 0 {
+		return sourceBase == targetBase
+	}
+	return targetSize >= sourceSize
+}
+
+func numericTypeCanWiden(source Column, target Column) bool {
+	sourceKind := numericKind(source)
+	targetKind := numericKind(target)
+	if sourceKind == "" || targetKind == "" {
+		return false
+	}
+	if sourceKind == targetKind {
+		return true
+	}
+	if sourceKind == "integral" && (targetKind == "floating" || targetKind == "decimal") {
+		return true
+	}
+	if sourceKind == "floating" && targetKind == "decimal" {
 		return true
 	}
 	return false
 }
 
-func canonicalType(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+func numericKind(column Column) string {
+	base, _ := parseNativeType(column.NativeType)
+	if base == "" {
+		base = canonicalType(column.DataType)
+	}
+	switch base {
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "serial", "bigserial", "int4", "int8":
+		return "integral"
+	case "real", "float", "double", "double precision", "float4", "float8":
+		return "floating"
+	case "numeric", "decimal":
+		return "decimal"
+	default:
+		return ""
+	}
+}
+
+func parseNativeType(value string) (string, int) {
+	trimmed := canonicalType(value)
+	if trimmed == "" {
+		return "", 0
+	}
+	matches := nativeTypePattern.FindStringSubmatch(trimmed)
+	if len(matches) == 0 {
+		return trimmed, 0
+	}
+	size := 0
+	if matches[2] != "" {
+		parsed, err := strconv.Atoi(matches[2])
+		if err == nil {
+			size = parsed
+		}
+	}
+	return strings.TrimSpace(matches[1]), size
+}
+
+func isStringType(base string) bool {
+	switch base {
+	case "char", "character", "varchar", "character varying", "tinytext", "text", "mediumtext", "longtext":
+		return true
+	default:
+		return false
+	}
+}
+
+func textTypeRank(base string) int {
+	switch base {
+	case "char", "character":
+		return 1
+	case "varchar", "character varying":
+		return 2
+	case "tinytext":
+		return 3
+	case "text":
+		return 4
+	case "mediumtext":
+		return 5
+	case "longtext":
+		return 6
+	default:
+		return 0
+	}
 }

@@ -196,6 +196,51 @@ func TestTargetOptionalColumns(t *testing.T) {
 	}
 }
 
+func TestCompatibleTypeWideningDoesNotBlock(t *testing.T) {
+	report := CompareSnapshots(
+		Snapshot{
+			Role:   "source",
+			Engine: model.EngineMySQL,
+			Tables: []Table{{
+				ID: TableID{Name: "products"},
+				Columns: []Column{
+					{Name: "id", Ordinal: 1, DataType: "int", NativeType: "int(11)"},
+					{Name: "sku", Ordinal: 2, DataType: "varchar", NativeType: "varchar(50)"},
+					{Name: "price", Ordinal: 3, DataType: "int", NativeType: "int(11)"},
+				},
+				PrimaryKey: PrimaryKey{Columns: []string{"id"}},
+			}},
+		},
+		Snapshot{
+			Role:   "target",
+			Engine: model.EngineMySQL,
+			Tables: []Table{{
+				ID: TableID{Name: "products"},
+				Columns: []Column{
+					{Name: "id", Ordinal: 1, DataType: "int", NativeType: "int(11)"},
+					{Name: "sku", Ordinal: 2, DataType: "varchar", NativeType: "varchar(255)"},
+					{Name: "price", Ordinal: 3, DataType: "double", NativeType: "double"},
+				},
+				PrimaryKey: PrimaryKey{Columns: []string{"id"}},
+			}},
+		},
+	)
+
+	products, ok := report.TableByID(TableID{Name: "products"})
+	if !ok {
+		t.Fatal("expected products table drift")
+	}
+	if products.Classification != ClassificationWritable {
+		t.Fatalf("classification = %q, want %q", products.Classification, ClassificationWritable)
+	}
+	if len(products.Blockers) != 0 {
+		t.Fatalf("Blockers = %v, want none", products.Blockers)
+	}
+	if len(products.Warnings) != 0 {
+		t.Fatalf("Warnings = %v, want none", products.Warnings)
+	}
+}
+
 func assertReason(t *testing.T, reasons []DriftReason, code DriftReasonCode, tableID TableID, column string) {
 	t.Helper()
 	for _, reason := range reasons {

@@ -6,19 +6,10 @@ import (
 	"strings"
 )
 
-type BlockedExclusion struct {
-	Table      TableID
-	RequiredBy []TableID
-}
-
 type SelectionPreview struct {
-	ExplicitIncludes   []TableID
-	ExplicitExclusions []TableID
-	IgnoredExclusions  []string
-	RequiredTables     []TableID
-	BlockedExclusions  []BlockedExclusion
-	FinalTables        []TableID
-	Blocked            bool
+	ExplicitIncludes []TableID
+	RequiredTables   []TableID
+	FinalTables      []TableID
 }
 
 func PreviewSelection(graph Graph, selected []string, excluded []string) (SelectionPreview, error) {
@@ -26,26 +17,22 @@ func PreviewSelection(graph Graph, selected []string, excluded []string) (Select
 	if err != nil {
 		return SelectionPreview{}, err
 	}
-	excludeIDs, ignoredExclusions, err := resolveExclusionIDs(graph, excluded)
+	excludedIDs, err := resolveSelectionIDs(graph, excluded)
 	if err != nil {
 		return SelectionPreview{}, err
 	}
 	if len(includeIDs) == 0 {
 		includeIDs = graph.Tables()
 	}
+	excludedSet := tableSet(excludedIDs)
+	includeIDs = filterTableIDs(includeIDs, excludedSet)
 	closure := graph.Closure(includeIDs)
-	closureSet := tableSet(closure)
-	excludeSet := tableSet(excludeIDs)
 	includeSet := tableSet(includeIDs)
 
 	required := make([]TableID, 0)
-	blocked := make(map[TableID]map[TableID]struct{})
-	finalSet := make(map[TableID]struct{}, len(closureSet))
+	finalSet := make(map[TableID]struct{}, len(closure))
 	for _, id := range closure {
-		if _, excluded := excludeSet[id]; excluded {
-			if _, explicit := includeSet[id]; explicit {
-				finalSet[id] = struct{}{}
-			}
+		if _, excluded := excludedSet[id]; excluded {
 			continue
 		}
 		finalSet[id] = struct{}{}
@@ -54,38 +41,22 @@ func PreviewSelection(graph Graph, selected []string, excluded []string) (Select
 		}
 	}
 
-	for tableID := range closureSet {
-		for _, dependency := range graph.DependenciesFor(tableID) {
-			if _, inClosure := closureSet[dependency.To]; !inClosure {
-				continue
-			}
-			if _, excluded := excludeSet[dependency.To]; !excluded {
-				continue
-			}
-			if _, ok := blocked[dependency.To]; !ok {
-				blocked[dependency.To] = map[TableID]struct{}{}
-			}
-			blocked[dependency.To][tableID] = struct{}{}
-		}
-	}
-
-	blockedExclusions := make([]BlockedExclusion, 0, len(blocked))
-	for tableID, requiredBy := range blocked {
-		blockedExclusions = append(blockedExclusions, BlockedExclusion{Table: tableID, RequiredBy: orderedTableSet(requiredBy)})
-	}
-	sort.Slice(blockedExclusions, func(i, j int) bool {
-		return blockedExclusions[i].Table.String() < blockedExclusions[j].Table.String()
-	})
-
 	return SelectionPreview{
-		ExplicitIncludes:   includeIDs,
-		ExplicitExclusions: excludeIDs,
-		IgnoredExclusions:  ignoredExclusions,
-		RequiredTables:     sortTableIDs(required),
-		BlockedExclusions:  blockedExclusions,
-		FinalTables:        graph.OrderTables(finalSet),
-		Blocked:            len(blockedExclusions) > 0,
+		ExplicitIncludes: includeIDs,
+		RequiredTables:   sortTableIDs(required),
+		FinalTables:      graph.OrderTables(finalSet),
 	}, nil
+}
+
+func filterTableIDs(values []TableID, blocked map[TableID]struct{}) []TableID {
+	filtered := make([]TableID, 0, len(values))
+	for _, value := range values {
+		if _, excluded := blocked[value]; excluded {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return filtered
 }
 
 func SelectionStrings(ids []TableID) []string {
@@ -160,47 +131,12 @@ func resolveSelectionID(graph Graph, value string) (TableID, error) {
 	}
 }
 
-func resolveExclusionIDs(graph Graph, values []string) ([]TableID, []string, error) {
-	resolved := make([]TableID, 0, len(values))
-	ignored := make([]string, 0)
-	seen := map[TableID]struct{}{}
-	ignoredSeen := map[string]struct{}{}
-	for _, value := range values {
-		id, err := resolveSelectionID(graph, value)
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "unknown table selection ") {
-				if _, ok := ignoredSeen[value]; !ok {
-					ignoredSeen[value] = struct{}{}
-					ignored = append(ignored, value)
-				}
-				continue
-			}
-			return nil, nil, err
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		resolved = append(resolved, id)
-	}
-	sort.Strings(ignored)
-	return sortTableIDs(resolved), ignored, nil
-}
-
 func tableSet(values []TableID) map[TableID]struct{} {
 	set := make(map[TableID]struct{}, len(values))
 	for _, value := range values {
 		set[value] = struct{}{}
 	}
 	return set
-}
-
-func orderedTableSet(values map[TableID]struct{}) []TableID {
-	result := make([]TableID, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	return sortTableIDs(result)
 }
 
 func sortTableIDs(values []TableID) []TableID {

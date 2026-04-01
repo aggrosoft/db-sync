@@ -65,26 +65,14 @@ func TestDependencyClosure(t *testing.T) {
 		t.Fatalf("closure = %v, want %v", got, want)
 	}
 
-	preview, err := PreviewSelection(graph, []string{"public.order_items"}, []string{"public.orders"})
+	preview, err := PreviewSelection(graph, []string{"public.order_items"}, nil)
 	if err != nil {
 		t.Fatalf("PreviewSelection() error = %v", err)
 	}
-	if !preview.Blocked {
-		t.Fatal("preview.Blocked = false, want true")
-	}
-	if got, want := SelectionStrings(preview.RequiredTables), []string{"public.customers"}; !sameStrings(got, want) {
+	if got, want := SelectionStrings(preview.RequiredTables), []string{"public.customers", "public.orders"}; !sameStrings(got, want) {
 		t.Fatalf("RequiredTables = %v, want %v", got, want)
 	}
-	if len(preview.BlockedExclusions) != 1 {
-		t.Fatalf("BlockedExclusions = %d, want 1", len(preview.BlockedExclusions))
-	}
-	if preview.BlockedExclusions[0].Table != (TableID{Schema: "public", Name: "orders"}) {
-		t.Fatalf("blocked exclusion table = %s, want public.orders", preview.BlockedExclusions[0].Table.String())
-	}
-	if got, want := SelectionStrings(preview.BlockedExclusions[0].RequiredBy), []string{"public.order_items"}; !sameStrings(got, want) {
-		t.Fatalf("BlockedExclusions[0].RequiredBy = %v, want %v", got, want)
-	}
-	if got, want := SelectionStrings(preview.FinalTables), []string{"public.customers", "public.order_items"}; !sameStrings(got, want) {
+	if got, want := SelectionStrings(preview.FinalTables), []string{"public.customers", "public.orders", "public.order_items"}; !sameStrings(got, want) {
 		t.Fatalf("FinalTables = %v, want %v", got, want)
 	}
 }
@@ -126,18 +114,36 @@ func TestPreviewSelectionRejectsAmbiguousBareNames(t *testing.T) {
 	}
 }
 
-func TestPreviewSelectionIgnoresUnknownExclusions(t *testing.T) {
+func TestPreviewSelectionHardExcludesTables(t *testing.T) {
 	graph := BuildDependencyGraph(Snapshot{
 		Role:   "source",
 		Engine: model.EngineMariaDB,
-		Tables: []Table{{ID: TableID{Schema: "db", Name: "customer"}}},
+		Tables: []Table{
+			{ID: TableID{Schema: "db", Name: "customer"}},
+			{ID: TableID{Schema: "db", Name: "plugin"}},
+			{ID: TableID{Schema: "db", Name: "order"}, ForeignKeys: []ForeignKey{
+				{Name: "order_customer_fk", Columns: []string{"customer_id"}, ReferencedTable: TableID{Schema: "db", Name: "customer"}, ReferencedColumns: []string{"id"}},
+				{Name: "order_plugin_fk", Columns: []string{"plugin_id"}, ReferencedTable: TableID{Schema: "db", Name: "plugin"}, ReferencedColumns: []string{"id"}},
+			}},
+		},
 	})
 
-	preview, err := PreviewSelection(graph, []string{"customer"}, []string{"logs"})
+	preview, err := PreviewSelection(graph, []string{"order"}, []string{"plugin"})
 	if err != nil {
 		t.Fatalf("PreviewSelection() error = %v", err)
 	}
-	if got, want := preview.IgnoredExclusions, []string{"logs"}; !sameStrings(got, want) {
-		t.Fatalf("IgnoredExclusions = %v, want %v", got, want)
+	if got, want := SelectionStrings(preview.ExplicitIncludes), []string{"db.order"}; !sameStrings(got, want) {
+		t.Fatalf("ExplicitIncludes = %v, want %v", got, want)
+	}
+	if got, want := SelectionStrings(preview.RequiredTables), []string{"db.customer"}; !sameStrings(got, want) {
+		t.Fatalf("RequiredTables = %v, want %v", got, want)
+	}
+	if got, want := SelectionStrings(preview.FinalTables), []string{"db.customer", "db.order"}; !sameStrings(got, want) {
+		t.Fatalf("FinalTables = %v, want %v", got, want)
+	}
+	for _, value := range preview.FinalTables {
+		if value == (TableID{Schema: "db", Name: "plugin"}) {
+			t.Fatal("FinalTables contains excluded table db.plugin")
+		}
 	}
 }
