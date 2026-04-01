@@ -1,36 +1,36 @@
 # db-sync
 
-Kleines CLI-Tool, um ausgewählte Tabellen von einer Quell-Datenbank in eine Ziel-Datenbank zu prüfen und zu synchronisieren.
+Small CLI tool for analyzing and synchronizing selected tables from a source database into a target database.
 
-Aktuell unterstützt:
+Currently supported:
 
-- schema analyze ohne Schreibzugriff
-- insert-missing für fehlende Zielzeilen
-- upsert für bestehende Zielzeilen auf Basis des Primärschlüssels
-- optionales mirror-delete für Zielzeilen, die in der Quelle nicht mehr existieren
-- MySQL, MariaDB und PostgreSQL als Endpunkte
+- schema analysis without write access
+- insert-missing for rows that are missing in the target
+- upsert for existing rows based on the primary key
+- optional mirror-delete for target rows that no longer exist in the source
+- MySQL, MariaDB, and PostgreSQL endpoints
 
-## Schnellstart
+## Quick Start
 
-### 1. Lokale Beispiel-Datenbanken starten
+### 1. Start local example databases
 
 ```bash
 docker compose up -d
 ```
 
-Das Compose-Setup startet:
+The Compose setup starts:
 
-- Quelle auf Port 3306
-- Ziel auf Port 3307
-- Adminer auf Port 8080
+- source on port 3306
+- target on port 3307
+- Adminer on port 8080
 
-Siehe auch [docker-compose.yaml](docker-compose.yaml).
+See also [docker-compose.yaml](docker-compose.yaml).
 
-### 2. `.env` anlegen
+### 2. Create `.env`
 
-Als Startpunkt kannst du [.env.example](.env.example) verwenden.
+Use [.env.example](.env.example) as a starting point.
 
-Wichtige Variablen:
+Important variables:
 
 ```env
 DB_SYNC_SOURCE_HOST=localhost
@@ -52,9 +52,9 @@ DB_SYNC_EXCLUDE_TABLES=app,integration,plugin
 DB_SYNC_MIRROR_DELETE=false
 ```
 
-## CLI verwenden
+## CLI Usage
 
-Ohne Build:
+Without building:
 
 ```bash
 go run ./cmd/db-sync analyze --env-file .env
@@ -62,7 +62,7 @@ go run ./cmd/db-sync run --dry-run --env-file .env
 go run ./cmd/db-sync run --env-file .env
 ```
 
-Mit gebautem Binary:
+With a built binary:
 
 ```bash
 go build -o db-sync ./cmd/db-sync
@@ -73,60 +73,60 @@ go build -o db-sync ./cmd/db-sync
 
 ## Releases
 
-Ein Push eines Tags im Format `v*` startet den Release-Workflow in GitHub Actions.
-Dabei werden Release-Artefakte fuer Linux, macOS und Windows gebaut und direkt an den GitHub-Release zum Tag angehaengt.
+Pushing a tag matching `v*` triggers the release workflow in GitHub Actions.
+It builds release artifacts for Linux, macOS, and Windows and attaches them directly to the GitHub release for that tag.
 
 ## Commands
 
 ### `db-sync analyze`
 
-Prüft die Konfiguration und schreibt nichts ins Ziel.
+Validates the configuration and does not write anything to the target.
 
-Die Analyse umfasst:
+The analysis includes:
 
-- Laden der Konfiguration aus den Environment-Variablen
-- Verbindungs- und Metadatenprüfung für Source und Target
-- Schema-Discovery für die ausgewählten Tabellen
-- automatische Einbeziehung benötigter Abhängigkeiten
-- getrennte Darstellung von explizit ausgewählten und implizit benötigten Tabellen
-- Drift-Report für die final synchronisierten Tabellen
+- loading configuration from environment variables
+- connection and metadata validation for source and target
+- schema discovery for the selected tables
+- automatic inclusion of required dependencies
+- separate reporting for explicitly selected and implicitly required tables
+- drift report for the final synchronized tables
 
-Wenn Blocker gefunden werden, bricht `analyze` mit einem Fehler ab.
+If blockers are found, `analyze` exits with an error.
 
 ### `db-sync run`
 
-Führt die Synchronisierung aus.
+Executes the synchronization.
 
-Optionen:
+Options:
 
-- `--dry-run`: zählt geplante Änderungen, schreibt aber nichts ins Ziel
+- `--dry-run`: counts planned changes but does not write anything to the target
 
-`run` verwendet intern dieselbe Vorprüfung wie `analyze`, gibt bei erfolgreichem Lauf aber nur den Sync-Report aus. Bei `--dry-run` enthält dieser Report die geplanten Inserts, Updates und Deletes.
+`run` uses the same preflight checks as `analyze`, but on success it only prints the sync report. With `--dry-run`, that report contains the planned inserts, updates, and deletes.
 
-## Sync-Semantik
+## Sync Semantics
 
-- Explizit ausgewählte Tabellen aus `DB_SYNC_TABLES`: fügt fehlende Zeilen ein und aktualisiert bestehende Zielzeilen, wenn sich nicht-PK-Spalten unterscheiden
-- Implizit benötigte Relationstabellen: nur fehlende Inserts, keine Updates
-- `DB_SYNC_EXCLUDE_TABLES`: schließt Tabellen hart aus, auch wenn sie sonst als implizite Abhängigkeit nachgezogen würden
+- Explicitly selected tables from `DB_SYNC_TABLES`: insert missing rows and update existing target rows when non-primary-key columns differ
+- Implicitly required relation tables: insert missing rows only, no updates
+- `DB_SYNC_EXCLUDE_TABLES`: excludes tables hard, even if they would otherwise be pulled in as implicit dependencies
 
-Bei MySQL und MariaDB deaktiviert `run` die FK-Prüfung auf der gepinnten Target-Session während des Schreiblaufs immer temporär. Das ist nötig, weil reine Insert-Reihenfolge zyklische oder gegenseitig verschachtelte Referenzen zwischen Tabellen nicht generell auflösen kann. Beim Reaktivieren findet keine rückwirkende Validierung bereits geschriebener Zeilen statt.
+For MySQL and MariaDB, `run` always disables foreign key checks temporarily on the pinned target session during the write phase. This is necessary because insert order alone cannot reliably resolve cyclic or mutually nested references between tables. Re-enabling foreign key checks does not retroactively validate rows that were already written.
 
 ### `DB_SYNC_MIRROR_DELETE=true`
 
-- Löscht nur in explizit ausgewählten Tabellen Zielzeilen, die in der Quelle nicht mehr vorhanden sind
-- Implizit benötigte Relationstabellen werden dabei nicht gelöscht
-- Die Löschreihenfolge läuft vor Inserts und Updates rückwärts durch die Abhängigkeitskette der expliziten Tabellen, damit Fremdschlüssel und Unique Keys eher sauber bleiben
+- Deletes target rows that no longer exist in the source only for explicitly selected tables
+- Does not delete implicitly required relation tables
+- Runs deletions before inserts and updates, in reverse dependency order for explicit tables, to reduce foreign key and unique key conflicts
 
-## Aktuelle Grenzen
+## Current Limitations
 
-- Der Sync erwartet Primärschlüssel auf den synchronisierten Tabellen
-- Abgleich und Updates laufen aktuell zeilenorientiert, nicht chunked
-- Upsert basiert aktuell auf Primärschlüsseln, nicht auf separaten Unique Keys
-- Es gibt noch keine Rollback-Artefakte oder Checkpoints
+- Sync expects primary keys on synchronized tables
+- Comparison and updates are currently row-oriented, not chunked
+- Upsert currently relies on primary keys, not separate unique keys
+- There are no rollback artifacts or checkpoints yet
 
-## Entwicklung
+## Development
 
-Relevante Kommandos:
+Relevant commands:
 
 ```bash
 go test ./...
