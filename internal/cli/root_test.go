@@ -163,3 +163,45 @@ func TestRunCommandAcceptsDryRunFlag(t *testing.T) {
 		t.Fatalf("dryRun flags = %v, want [true]", runner.dryRuns)
 	}
 }
+
+func TestVersionCommandPrintsConfiguredVersion(t *testing.T) {
+	originalVersion := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() {
+		Version = originalVersion
+	})
+
+	stdout := &bytes.Buffer{}
+	cmd := NewRootCommand(NewApp(stdout, &bytes.Buffer{}))
+	cmd.SetOut(stdout)
+	cmd.SetErr(stdout)
+	cmd.SetArgs([]string{"version"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := stdout.String(); got != "v1.2.3\n" {
+		t.Fatalf("stdout = %q, want version output", got)
+	}
+}
+
+func TestRootCommandSupportsVersionFlag(t *testing.T) {
+	originalVersion := Version
+	Version = "v9.9.9"
+	t.Cleanup(func() {
+		Version = originalVersion
+	})
+
+	stdout := &bytes.Buffer{}
+	cmd := NewRootCommand(NewApp(stdout, &bytes.Buffer{}))
+	cmd.SetOut(stdout)
+	cmd.SetErr(stdout)
+	cmd.SetArgs([]string{"--version"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "v9.9.9") {
+		t.Fatalf("stdout = %q, want version string", got)
+	}
+}

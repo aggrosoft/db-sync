@@ -7,6 +7,7 @@ import (
 
 	"db-sync/internal/schema"
 	syncapp "db-sync/internal/sync"
+
 	prettytable "github.com/jedib0t/go-pretty/v6/table"
 	prettytext "github.com/jedib0t/go-pretty/v6/text"
 )

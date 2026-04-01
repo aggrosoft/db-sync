@@ -68,7 +68,13 @@ Mit gebautem Binary:
 go build -o db-sync ./cmd/db-sync
 ./db-sync analyze --env-file .env
 ./db-sync run --dry-run --env-file .env
+./db-sync version
 ```
+
+## Releases
+
+Ein Push eines Tags im Format `v*` startet den Release-Workflow in GitHub Actions.
+Dabei werden Release-Artefakte fuer Linux, macOS und Windows gebaut und direkt an den GitHub-Release zum Tag angehaengt.
 
 ## Commands
 
