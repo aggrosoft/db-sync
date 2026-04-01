@@ -1,0 +1,43 @@
+services:
+  db-sync-source:
+    image: mariadb
+    container_name: db-sync-source
+    restart: always
+    ports:
+      - 3306:3306
+    volumes:
+      - .local/dump.sql:/docker-entrypoint-initdb.d/dump.sql
+    environment:
+      - MARIADB_ROOT_PASSWORD=root
+      - MARIADB_DATABASE=db
+      - MARIADB_USER=dev
+      - MARIADB_PASSWORD=dev
+    networks:
+      - db-sync
+    
+  db-sync-target:
+    image: mariadb
+    container_name: db-sync-target
+    restart: always
+    ports:
+      - 3307:3306
+    volumes:
+      - .local/dump-dev.sql:/docker-entrypoint-initdb.d/dump.sql
+    environment:
+      - MARIADB_ROOT_PASSWORD=root
+      - MARIADB_DATABASE=db
+      - MARIADB_USER=dev
+      - MARIADB_PASSWORD=dev
+    networks:
+      - db-sync
+    
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - 8080:8080
+    networks:
+      - db-sync
+
+networks:
+  db-sync:

@@ -8,8 +8,6 @@ import (
 	"db-sync/internal/model"
 )
 
-var ErrProfileNotFound = errors.New("profile not found")
-
 type Status string
 
 const (
@@ -36,27 +34,12 @@ type ValidationReport struct {
 	Source     EndpointValidation `yaml:"source"`
 	Target     EndpointValidation `yaml:"target"`
 	MissingEnv []string           `yaml:"missing_env,omitempty"`
-	SavedPath  string             `yaml:"saved_path,omitempty"`
 	Blocked    bool               `yaml:"blocked"`
 	Summary    string             `yaml:"summary,omitempty"`
 }
 
-type StoredProfile struct {
-	Name string
-	Slug string
-	Path string
-}
-
-type ProfileStore interface {
-	Save(ctx context.Context, profile model.Profile) (string, error)
-	Load(ctx context.Context, name string) (model.Profile, error)
-	List(ctx context.Context) ([]StoredProfile, error)
-	PathFor(name string) (string, error)
-}
-
 type ProfileValidator interface {
 	ValidateProfile(ctx context.Context, profile model.Profile) (ValidationReport, error)
-	ValidateAndSave(ctx context.Context, profile model.Profile) (ValidationReport, error)
 }
 
 func (report ValidationReport) Error() error {

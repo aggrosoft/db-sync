@@ -3,7 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
+	"strings"
 	"testing"
 
 	"db-sync/internal/model"
@@ -11,181 +11,139 @@ import (
 	"db-sync/internal/schema"
 )
 
-type scriptedWizard struct {
-	startNewProfile model.Profile
-	startNewErr     error
-	editProfiles    []model.Profile
-	editErr         error
-	startNewCalls   int
-	startEditCalls  int
-	startEditInputs []model.Profile
+type fakeValidator struct {
+	report profile.ValidationReport
+	err    error
+	inputs []model.Profile
 }
 
-func (wizard *scriptedWizard) StartNew(context.Context) (model.Profile, error) {
-	wizard.startNewCalls++
-	if wizard.startNewErr != nil {
-		return model.Profile{}, wizard.startNewErr
-	}
-	return wizard.startNewProfile, nil
-}
-
-func (wizard *scriptedWizard) StartEdit(_ context.Context, existing model.Profile) (model.Profile, error) {
-	wizard.startEditCalls++
-	wizard.startEditInputs = append(wizard.startEditInputs, existing)
-	if wizard.editErr != nil {
-		return model.Profile{}, wizard.editErr
-	}
-	if len(wizard.editProfiles) == 0 {
-		return model.Profile{}, errors.New("unexpected StartEdit call")
-	}
-	profile := wizard.editProfiles[0]
-	wizard.editProfiles = wizard.editProfiles[1:]
-	return profile, nil
-}
-
-func (wizard *scriptedWizard) SelectTables(_ context.Context, candidate model.Profile, _ schema.DiscoveryReport) (model.Profile, error) {
-	return candidate, nil
-}
-
-type scriptedValidator struct {
-	reports []profile.ValidationReport
-	errs    []error
-	inputs  []model.Profile
-}
-
-func (validator *scriptedValidator) ValidateProfile(context.Context, model.Profile) (profile.ValidationReport, error) {
-	return profile.ValidationReport{}, nil
-}
-
-func (validator *scriptedValidator) ValidateAndSave(_ context.Context, candidate model.Profile) (profile.ValidationReport, error) {
+func (validator *fakeValidator) ValidateProfile(_ context.Context, candidate model.Profile) (profile.ValidationReport, error) {
 	validator.inputs = append(validator.inputs, candidate)
-	if len(validator.reports) == 0 {
-		return profile.ValidationReport{}, nil
-	}
-	report := validator.reports[0]
-	validator.reports = validator.reports[1:]
-	var err error
-	if len(validator.errs) > 0 {
-		err = validator.errs[0]
-		validator.errs = validator.errs[1:]
-	}
-	return report, err
+	return validator.report, validator.err
 }
 
-type scriptedStore struct {
-	profile model.Profile
-	err     error
-}
-
-type scriptedDiscoverer struct {
+type fakeDiscoverer struct {
 	report schema.DiscoveryReport
 	err    error
+	inputs []model.Profile
 }
 
-func (discoverer scriptedDiscoverer) DiscoverProfile(context.Context, model.Profile) (schema.DiscoveryReport, error) {
+func (discoverer *fakeDiscoverer) DiscoverProfile(_ context.Context, candidate model.Profile) (schema.DiscoveryReport, error) {
+	discoverer.inputs = append(discoverer.inputs, candidate)
 	return discoverer.report, discoverer.err
 }
 
-func (store scriptedStore) Save(context.Context, model.Profile) (string, error) {
-	return "", nil
-}
-
-func (store scriptedStore) Load(context.Context, string) (model.Profile, error) {
-	if store.err != nil {
-		return model.Profile{}, store.err
-	}
-	return store.profile, nil
-}
-
-func (store scriptedStore) List(context.Context) ([]profile.StoredProfile, error) {
-	return nil, nil
-}
-
-func (store scriptedStore) PathFor(string) (string, error) {
-	return "", nil
-}
-
-func TestStartInteractiveProfileRetriesBlockedValidation(t *testing.T) {
+func TestRunFromEnvironmentBuildsProfileAndRendersPreview(t *testing.T) {
 	stdout := &bytes.Buffer{}
-	initial := model.DefaultProfile("retry-me")
-	wizard := &scriptedWizard{startNewProfile: initial}
-	validator := &scriptedValidator{
-		reports: []profile.ValidationReport{
-			{Blocked: true, Summary: "source validation failed"},
-			{SavedPath: "memory://retry-me", Summary: "Validation passed and profile was saved."},
-		},
-		errs: []error{errors.New("source validation failed"), nil},
-	}
-	app := NewApp(bytes.NewBuffer(nil), stdout, &bytes.Buffer{})
-	app.SetWizard(wizard)
-	app.SetValidator(validator)
-	app.SetDiscoverer(scriptedDiscoverer{})
-	app.SetValidationFailurePrompt(func(context.Context, model.Profile, profile.ValidationReport) (validationFailureAction, error) {
-		return validationFailureRetry, nil
+	validator := &fakeValidator{report: profile.ValidationReport{
+		Source:  profile.EndpointValidation{Role: "source", Engine: model.EngineMariaDB, Status: profile.StatusPassed},
+		Target:  profile.EndpointValidation{Role: "target", Engine: model.EngineMariaDB, Status: profile.StatusPassed},
+		Summary: "Validation passed for both endpoints.",
+	}}
+	discoverer := &fakeDiscoverer{report: schema.DiscoveryReport{
+		Source: schema.EndpointDiscovery{Role: "source", Engine: model.EngineMariaDB, Snapshot: schema.Snapshot{
+			Role:   "source",
+			Engine: model.EngineMariaDB,
+			Tables: []schema.Table{
+				{ID: schema.TableID{Name: "logs"}},
+				{ID: schema.TableID{Name: "users"}},
+				{ID: schema.TableID{Name: "orders"}, ForeignKeys: []schema.ForeignKey{{Name: "orders_users_fk", Columns: []string{"user_id"}, ReferencedTable: schema.TableID{Name: "users"}, ReferencedColumns: []string{"id"}}}},
+			},
+		}},
+		Target:  schema.EndpointDiscovery{Role: "target", Engine: model.EngineMariaDB, Snapshot: schema.Snapshot{Role: "target", Engine: model.EngineMariaDB}},
+		Summary: "Schema discovery succeeded for both endpoints.",
+	}}
+	app := NewApp(stdout, &bytes.Buffer{})
+	app.SetEnvironment(map[string]string{
+		"DB_SYNC_SOURCE_HOST":     "localhost",
+		"DB_SYNC_SOURCE_PORT":     "3306",
+		"DB_SYNC_SOURCE_USER":     "dev",
+		"DB_SYNC_SOURCE_PASSWORD": "dev",
+		"DB_SYNC_SOURCE_DB":       "db",
+		"DB_SYNC_TARGET_HOST":     "localhost",
+		"DB_SYNC_TARGET_PORT":     "3307",
+		"DB_SYNC_TARGET_USER":     "dev",
+		"DB_SYNC_TARGET_PASSWORD": "dev",
+		"DB_SYNC_TARGET_DB":       "db",
+		"DB_SYNC_TABLES":          "users,orders",
+		"DB_SYNC_EXCLUDE_TABLES":  "logs",
 	})
+	app.SetValidator(validator)
+	app.SetDiscoverer(discoverer)
 
-	if err := app.StartInteractiveProfile(context.Background()); err != nil {
-		t.Fatalf("StartInteractiveProfile() error = %v", err)
+	if err := app.RunFromEnvironment(context.Background()); err != nil {
+		t.Fatalf("RunFromEnvironment() error = %v", err)
 	}
-	if wizard.startNewCalls != 1 {
-		t.Fatalf("StartNew calls = %d, want 1", wizard.startNewCalls)
+	if len(validator.inputs) != 1 {
+		t.Fatalf("ValidateProfile calls = %d, want 1", len(validator.inputs))
 	}
-	if wizard.startEditCalls != 0 {
-		t.Fatalf("StartEdit calls = %d, want 0", wizard.startEditCalls)
+	loaded := validator.inputs[0]
+	if loaded.Source.Connection.Details.Host != "localhost" {
+		t.Fatalf("source host = %q, want localhost", loaded.Source.Connection.Details.Host)
 	}
-	if len(validator.inputs) != 2 {
-		t.Fatalf("ValidateAndSave calls = %d, want 2", len(validator.inputs))
+	if loaded.Target.Connection.Details.Port != 3307 {
+		t.Fatalf("target port = %d, want 3307", loaded.Target.Connection.Details.Port)
 	}
-	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("Saved profile to memory://retry-me")) {
-		t.Fatalf("stdout = %q, want saved profile message", got)
+	if got, want := strings.Join(loaded.Selection.Tables, ","), "users,orders"; got != want {
+		t.Fatalf("selection tables = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(loaded.Selection.ExcludedTables, ","), "logs"; got != want {
+		t.Fatalf("selection exclusions = %q, want %q", got, want)
+	}
+	output := stdout.String()
+	for _, want := range []string{"Loaded configuration from environment.", "Validation passed for both endpoints.", "Schema discovery succeeded for both endpoints.", "Final table order: users, orders"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stdout = %q, want substring %q", output, want)
+		}
 	}
 }
 
-func TestRunProfileEditAllowsModifyAfterBlockedValidation(t *testing.T) {
+func TestRunFromEnvironmentBlocksRequiredExclusions(t *testing.T) {
 	stdout := &bytes.Buffer{}
-	existing := model.DefaultProfile("edit-me")
-	firstEdit := existing
-	updated := existing
-	updated.Source.Engine = model.EngineMySQL
-	wizard := &scriptedWizard{editProfiles: []model.Profile{firstEdit, updated}}
-	validator := &scriptedValidator{
-		reports: []profile.ValidationReport{
-			{Blocked: true, Summary: "target validation failed"},
-			{SavedPath: "memory://edit-me", Summary: "Validation passed and profile was saved."},
-		},
-		errs: []error{errors.New("target validation failed"), nil},
-	}
-	app := NewApp(bytes.NewBuffer(nil), stdout, &bytes.Buffer{})
-	app.SetStore(scriptedStore{profile: existing})
-	app.SetWizard(wizard)
-	app.SetValidator(validator)
-	app.SetDiscoverer(scriptedDiscoverer{})
-	app.SetValidationFailurePrompt(func(context.Context, model.Profile, profile.ValidationReport) (validationFailureAction, error) {
-		return validationFailureModify, nil
+	validator := &fakeValidator{report: profile.ValidationReport{
+		Source:  profile.EndpointValidation{Role: "source", Engine: model.EngineMariaDB, Status: profile.StatusPassed},
+		Target:  profile.EndpointValidation{Role: "target", Engine: model.EngineMariaDB, Status: profile.StatusPassed},
+		Summary: "Validation passed for both endpoints.",
+	}}
+	discoverer := &fakeDiscoverer{report: schema.DiscoveryReport{
+		Source: schema.EndpointDiscovery{Role: "source", Engine: model.EngineMariaDB, Snapshot: schema.Snapshot{
+			Role:   "source",
+			Engine: model.EngineMariaDB,
+			Tables: []schema.Table{
+				{ID: schema.TableID{Name: "customers"}},
+				{ID: schema.TableID{Name: "orders"}, ForeignKeys: []schema.ForeignKey{{Name: "orders_customers_fk", Columns: []string{"customer_id"}, ReferencedTable: schema.TableID{Name: "customers"}, ReferencedColumns: []string{"id"}}}},
+				{ID: schema.TableID{Name: "order_items"}, ForeignKeys: []schema.ForeignKey{{Name: "order_items_orders_fk", Columns: []string{"order_id"}, ReferencedTable: schema.TableID{Name: "orders"}, ReferencedColumns: []string{"id"}}}},
+			},
+		}},
+		Target:  schema.EndpointDiscovery{Role: "target", Engine: model.EngineMariaDB, Snapshot: schema.Snapshot{Role: "target", Engine: model.EngineMariaDB}},
+		Summary: "Schema discovery succeeded for both endpoints.",
+	}}
+	app := NewApp(stdout, &bytes.Buffer{})
+	app.SetEnvironment(map[string]string{
+		"DB_SYNC_SOURCE_HOST":     "localhost",
+		"DB_SYNC_SOURCE_PORT":     "3306",
+		"DB_SYNC_SOURCE_USER":     "dev",
+		"DB_SYNC_SOURCE_PASSWORD": "dev",
+		"DB_SYNC_SOURCE_DB":       "db",
+		"DB_SYNC_TARGET_HOST":     "localhost",
+		"DB_SYNC_TARGET_PORT":     "3307",
+		"DB_SYNC_TARGET_USER":     "dev",
+		"DB_SYNC_TARGET_PASSWORD": "dev",
+		"DB_SYNC_TARGET_DB":       "db",
+		"DB_SYNC_TABLES":          "order_items",
+		"DB_SYNC_EXCLUDE_TABLES":  "orders",
 	})
+	app.SetValidator(validator)
+	app.SetDiscoverer(discoverer)
 
-	if err := app.RunProfileEdit(context.Background(), existing.Name); err != nil {
-		t.Fatalf("RunProfileEdit() error = %v", err)
+	err := app.RunFromEnvironment(context.Background())
+	if err == nil {
+		t.Fatal("RunFromEnvironment() error = nil, want blocked selection error")
 	}
-	if wizard.startEditCalls != 2 {
-		t.Fatalf("StartEdit calls = %d, want 2", wizard.startEditCalls)
+	if err.Error() != "table selection is blocked by required exclusions" {
+		t.Fatalf("error = %q, want blocked selection error", err.Error())
 	}
-	if len(wizard.startEditInputs) != 2 {
-		t.Fatalf("StartEdit inputs = %d, want 2", len(wizard.startEditInputs))
-	}
-	if wizard.startEditInputs[0].Source.Engine != existing.Source.Engine {
-		t.Fatalf("initial StartEdit input = %+v, want original profile", wizard.startEditInputs[0])
-	}
-	if wizard.startEditInputs[1].Source.Engine != firstEdit.Source.Engine {
-		t.Fatalf("modify StartEdit input = %+v, want in-progress profile", wizard.startEditInputs[1])
-	}
-	if len(validator.inputs) != 2 {
-		t.Fatalf("ValidateAndSave calls = %d, want 2", len(validator.inputs))
-	}
-	if validator.inputs[1].Source.Engine != model.EngineMySQL {
-		t.Fatalf("modified profile engine = %q, want %q", validator.inputs[1].Source.Engine, model.EngineMySQL)
-	}
-	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("Saved profile to memory://edit-me")) {
-		t.Fatalf("stdout = %q, want saved profile message", got)
+	if output := stdout.String(); !strings.Contains(output, "Blocked exclusions: orders (required by order_items)") {
+		t.Fatalf("stdout = %q, want blocked exclusion summary", output)
 	}
 }

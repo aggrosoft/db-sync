@@ -2,13 +2,11 @@ package validate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 
 	"db-sync/internal/model"
 	"db-sync/internal/profile"
-	"db-sync/internal/secrets"
 )
 
 type Adapter interface {
@@ -19,31 +17,18 @@ type Adapter interface {
 type Registry map[model.Engine]Adapter
 
 type Service struct {
-	store       profile.ProfileStore
 	envProvider func() map[string]string
 	registry    Registry
 }
 
-func NewService(store profile.ProfileStore, envProvider func() map[string]string, registry Registry) *Service {
-	return &Service{store: store, envProvider: envProvider, registry: registry}
+func NewService(envProvider func() map[string]string, registry Registry) *Service {
+	return &Service{envProvider: envProvider, registry: registry}
 }
 
 func (service *Service) ValidateProfile(ctx context.Context, candidate model.Profile) (profile.ValidationReport, error) {
 	normalized, err := profile.NormalizeProfile(candidate)
 	if err != nil {
 		return profile.ValidationReport{}, err
-	}
-	if normalized.Source.EffectiveConnectionMode() == model.ConnectionModeLegacyTemplate {
-		if err := secrets.ValidateTemplatePolicy(normalized.Source.DSNTemplate); err != nil {
-			report := policyFailureReport("source", normalized.Source.Engine, err)
-			return report, err
-		}
-	}
-	if normalized.Target.EffectiveConnectionMode() == model.ConnectionModeLegacyTemplate {
-		if err := secrets.ValidateTemplatePolicy(normalized.Target.DSNTemplate); err != nil {
-			report := policyFailureReport("target", normalized.Target.Engine, err)
-			return report, err
-		}
 	}
 	env := service.envProvider()
 	sourceDSN, sourceMissing, err := ResolveEndpoint(normalized.Source, env)
@@ -80,23 +65,6 @@ func (service *Service) ValidateProfile(ctx context.Context, candidate model.Pro
 	return report, nil
 }
 
-func (service *Service) ValidateAndSave(ctx context.Context, candidate model.Profile) (profile.ValidationReport, error) {
-	report, err := service.ValidateProfile(ctx, candidate)
-	if err != nil {
-		return report, err
-	}
-	if report.Blocked {
-		return report, report.Error()
-	}
-	savedPath, err := service.store.Save(ctx, candidate)
-	if err != nil {
-		return report, err
-	}
-	report.SavedPath = savedPath
-	report.Summary = "Validation passed and profile was saved."
-	return report, nil
-}
-
 func (service *Service) adapterFor(engine model.Engine) (Adapter, error) {
 	adapter, ok := service.registry[engine]
 	if !ok {
@@ -107,23 +75,6 @@ func (service *Service) adapterFor(engine model.Engine) (Adapter, error) {
 
 func blockedReport(source profile.EndpointValidation, target profile.EndpointValidation, err error) profile.ValidationReport {
 	return profile.ValidationReport{Source: source, Target: target, Blocked: true, Summary: err.Error()}
-}
-
-func policyFailureReport(role string, engine model.Engine, err error) profile.ValidationReport {
-	endpoint := profile.EndpointValidation{
-		Role:    role,
-		Engine:  engine,
-		Status:  profile.StatusFailed,
-		Checks:  []profile.CheckResult{{Name: "placeholder policy", Status: profile.StatusFailed, Detail: err.Error()}},
-		Message: err.Error(),
-	}
-	report := profile.ValidationReport{Blocked: true, Summary: err.Error()}
-	if role == "source" {
-		report.Source = endpoint
-	} else {
-		report.Target = endpoint
-	}
-	return report
 }
 
 func dedupe(values []string) []string {
@@ -142,18 +93,6 @@ func dedupe(values []string) []string {
 	sort.Strings(result)
 	return result
 }
-
-func failedValidation(role string, engine model.Engine, detail string) profile.EndpointValidation {
-	return profile.EndpointValidation{
-		Role:    role,
-		Engine:  engine,
-		Status:  profile.StatusFailed,
-		Checks:  []profile.CheckResult{{Name: "connection", Status: profile.StatusFailed, Detail: detail}},
-		Message: detail,
-	}
-}
-
-var ErrBlockedSave = errors.New("blocked save")
 
 func firstConfiguredValue(values ...string) string {
 	for _, value := range values {

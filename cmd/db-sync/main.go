@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	app := cli.NewApp(os.Stdin, os.Stdout, os.Stderr)
+	app := cli.NewApp(os.Stdout, os.Stderr)
 	root := cli.NewRootCommand(app)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

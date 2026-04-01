@@ -6,19 +6,12 @@ import (
 	"net/url"
 
 	"db-sync/internal/model"
-	"db-sync/internal/secrets"
 
 	mysqlcfg "github.com/go-sql-driver/mysql"
 )
 
 func ResolveEndpoint(endpoint model.Endpoint, env map[string]string) (string, []string, error) {
 	switch endpoint.EffectiveConnectionMode() {
-	case model.ConnectionModeLegacyTemplate:
-		resolved, err := secrets.ResolveTemplate(endpoint.DSNTemplate, env)
-		if err != nil {
-			return "", resolved.Missing(), err
-		}
-		return resolved.Value(), nil, nil
 	case model.ConnectionModeConnectionString:
 		value := firstConfiguredValue(env[endpoint.Connection.ConnectionString.EnvVar], endpoint.Connection.ConnectionString.Value)
 		if value == "" {

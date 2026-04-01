@@ -88,3 +88,56 @@ func TestDependencyClosure(t *testing.T) {
 		t.Fatalf("FinalTables = %v, want %v", got, want)
 	}
 }
+
+func TestPreviewSelectionResolvesBareNamesAgainstQualifiedTables(t *testing.T) {
+	graph := BuildDependencyGraph(Snapshot{
+		Role:   "source",
+		Engine: model.EngineMariaDB,
+		Tables: []Table{
+			{ID: TableID{Schema: "db", Name: "customer"}},
+			{ID: TableID{Schema: "db", Name: "order"}, ForeignKeys: []ForeignKey{{Name: "order_customer_fk", Columns: []string{"customer_id"}, ReferencedTable: TableID{Schema: "db", Name: "customer"}, ReferencedColumns: []string{"id"}}}},
+		},
+	})
+
+	preview, err := PreviewSelection(graph, []string{"order"}, nil)
+	if err != nil {
+		t.Fatalf("PreviewSelection() error = %v", err)
+	}
+	if got, want := SelectionStrings(preview.ExplicitIncludes), []string{"db.order"}; !sameStrings(got, want) {
+		t.Fatalf("ExplicitIncludes = %v, want %v", got, want)
+	}
+	if got, want := SelectionStrings(preview.RequiredTables), []string{"db.customer"}; !sameStrings(got, want) {
+		t.Fatalf("RequiredTables = %v, want %v", got, want)
+	}
+}
+
+func TestPreviewSelectionRejectsAmbiguousBareNames(t *testing.T) {
+	graph := BuildDependencyGraph(Snapshot{
+		Role:   "source",
+		Engine: model.EngineMariaDB,
+		Tables: []Table{
+			{ID: TableID{Schema: "db1", Name: "customer"}},
+			{ID: TableID{Schema: "db2", Name: "customer"}},
+		},
+	})
+
+	if _, err := PreviewSelection(graph, []string{"customer"}, nil); err == nil {
+		t.Fatal("PreviewSelection() error = nil, want ambiguous selection error")
+	}
+}
+
+func TestPreviewSelectionIgnoresUnknownExclusions(t *testing.T) {
+	graph := BuildDependencyGraph(Snapshot{
+		Role:   "source",
+		Engine: model.EngineMariaDB,
+		Tables: []Table{{ID: TableID{Schema: "db", Name: "customer"}}},
+	})
+
+	preview, err := PreviewSelection(graph, []string{"customer"}, []string{"logs"})
+	if err != nil {
+		t.Fatalf("PreviewSelection() error = %v", err)
+	}
+	if got, want := preview.IgnoredExclusions, []string{"logs"}; !sameStrings(got, want) {
+		t.Fatalf("IgnoredExclusions = %v, want %v", got, want)
+	}
+}

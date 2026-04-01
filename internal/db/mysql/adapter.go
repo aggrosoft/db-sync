@@ -90,11 +90,19 @@ func (adapter *Adapter) validate(ctx context.Context, resolvedDSN string, engine
 	}
 	checks = append(checks, profile.CheckResult{Name: "metadata", Status: profile.StatusPassed, Detail: fmt.Sprintf("information_schema visible (%d rows)", tableCount)})
 	if requireWritable {
-		var readOnly int
-		if err := db.QueryRowContext(ctx, "select @@global.read_only").Scan(&readOnly); err != nil {
-			return failed(role, engine, "target capability", err.Error()), err
+		var readOnlyValue any
+		if err := db.QueryRowContext(ctx, "select @@global.read_only").Scan(&readOnlyValue); err != nil {
+			validation := failed(role, engine, "target capability", err.Error())
+			validation.Checks = append(checks, profile.CheckResult{Name: "target capability", Status: profile.StatusFailed, Detail: err.Error()})
+			return validation, err
 		}
-		if readOnly == 1 {
+		readOnly, err := parseReadOnlyValue(readOnlyValue)
+		if err != nil {
+			validation := failed(role, engine, "target capability", err.Error())
+			validation.Checks = append(checks, profile.CheckResult{Name: "target capability", Status: profile.StatusFailed, Detail: err.Error()})
+			return validation, err
+		}
+		if readOnly {
 			validation := failed(role, engine, "target capability", "target is read-only")
 			validation.Checks = append(checks, profile.CheckResult{Name: "target capability", Status: profile.StatusFailed, Detail: "target is read-only"})
 			return validation, fmt.Errorf("target is read-only")
@@ -102,6 +110,31 @@ func (adapter *Adapter) validate(ctx context.Context, resolvedDSN string, engine
 		checks = append(checks, profile.CheckResult{Name: "target capability", Status: profile.StatusPassed, Detail: "target accepts non-mutating probe"})
 	}
 	return profile.EndpointValidation{Role: role, Engine: engine, Status: profile.StatusPassed, Checks: checks}, nil
+}
+
+func parseReadOnlyValue(value any) (bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return false, fmt.Errorf("read_only probe returned no value")
+	case []byte:
+		return parseReadOnlyString(string(typed))
+	case sql.RawBytes:
+		return parseReadOnlyString(string(typed))
+	default:
+		return parseReadOnlyString(fmt.Sprint(typed))
+	}
+}
+
+func parseReadOnlyString(value string) (bool, error) {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	switch normalized {
+	case "1", "on", "true", "yes":
+		return true, nil
+	case "0", "off", "false", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unrecognized read_only value %q", value)
+	}
 }
 
 func failed(role string, engine model.Engine, name string, detail string) profile.EndpointValidation {

@@ -10,7 +10,6 @@ type ConnectionMode string
 const (
 	ConnectionModeConnectionString ConnectionMode = "connection-string"
 	ConnectionModeDetails          ConnectionMode = "details"
-	ConnectionModeLegacyTemplate   ConnectionMode = "legacy-template"
 )
 
 type Engine string
@@ -43,9 +42,8 @@ type Connection struct {
 }
 
 type Endpoint struct {
-	Engine      Engine     `yaml:"engine"`
-	Connection  Connection `yaml:"connection,omitempty"`
-	DSNTemplate string     `yaml:"dsn_template,omitempty"`
+	Engine     Engine     `yaml:"engine"`
+	Connection Connection `yaml:"connection,omitempty"`
 }
 
 type Selection struct {
@@ -113,9 +111,6 @@ func (endpoint Endpoint) WithDefaults() Endpoint {
 func (endpoint Endpoint) EffectiveConnectionMode() ConnectionMode {
 	if endpoint.Connection.Mode != "" {
 		return endpoint.Connection.Mode
-	}
-	if endpoint.DSNTemplate != "" {
-		return ConnectionModeLegacyTemplate
 	}
 	if endpoint.Connection.ConnectionString.Value != "" || endpoint.Connection.ConnectionString.EnvVar != "" {
 		return ConnectionModeConnectionString

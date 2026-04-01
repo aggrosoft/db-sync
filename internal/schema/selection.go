@@ -14,6 +14,7 @@ type BlockedExclusion struct {
 type SelectionPreview struct {
 	ExplicitIncludes   []TableID
 	ExplicitExclusions []TableID
+	IgnoredExclusions  []string
 	RequiredTables     []TableID
 	BlockedExclusions  []BlockedExclusion
 	FinalTables        []TableID
@@ -25,7 +26,7 @@ func PreviewSelection(graph Graph, selected []string, excluded []string) (Select
 	if err != nil {
 		return SelectionPreview{}, err
 	}
-	excludeIDs, err := resolveSelectionIDs(graph, excluded)
+	excludeIDs, ignoredExclusions, err := resolveExclusionIDs(graph, excluded)
 	if err != nil {
 		return SelectionPreview{}, err
 	}
@@ -79,6 +80,7 @@ func PreviewSelection(graph Graph, selected []string, excluded []string) (Select
 	return SelectionPreview{
 		ExplicitIncludes:   includeIDs,
 		ExplicitExclusions: excludeIDs,
+		IgnoredExclusions:  ignoredExclusions,
 		RequiredTables:     sortTableIDs(required),
 		BlockedExclusions:  blockedExclusions,
 		FinalTables:        graph.OrderTables(finalSet),
@@ -121,9 +123,9 @@ func resolveSelectionIDs(graph Graph, values []string) ([]TableID, error) {
 	resolved := make([]TableID, 0, len(values))
 	seen := map[TableID]struct{}{}
 	for _, value := range values {
-		id := ParseTableID(value)
-		if !graph.HasTable(id) {
-			return nil, fmt.Errorf("unknown table selection %q", value)
+		id, err := resolveSelectionID(graph, value)
+		if err != nil {
+			return nil, err
 		}
 		if _, ok := seen[id]; ok {
 			continue
@@ -132,6 +134,57 @@ func resolveSelectionIDs(graph Graph, values []string) ([]TableID, error) {
 		resolved = append(resolved, id)
 	}
 	return sortTableIDs(resolved), nil
+}
+
+func resolveSelectionID(graph Graph, value string) (TableID, error) {
+	id := ParseTableID(value)
+	if graph.HasTable(id) {
+		return id, nil
+	}
+	if id.Schema != "" {
+		return TableID{}, fmt.Errorf("unknown table selection %q", value)
+	}
+	matches := make([]TableID, 0)
+	for _, candidate := range graph.Tables() {
+		if candidate.Name == id.Name {
+			matches = append(matches, candidate)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return TableID{}, fmt.Errorf("unknown table selection %q", value)
+	case 1:
+		return matches[0], nil
+	default:
+		return TableID{}, fmt.Errorf("ambiguous table selection %q; qualify one of: %s", value, strings.Join(SelectionStrings(matches), ", "))
+	}
+}
+
+func resolveExclusionIDs(graph Graph, values []string) ([]TableID, []string, error) {
+	resolved := make([]TableID, 0, len(values))
+	ignored := make([]string, 0)
+	seen := map[TableID]struct{}{}
+	ignoredSeen := map[string]struct{}{}
+	for _, value := range values {
+		id, err := resolveSelectionID(graph, value)
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "unknown table selection ") {
+				if _, ok := ignoredSeen[value]; !ok {
+					ignoredSeen[value] = struct{}{}
+					ignored = append(ignored, value)
+				}
+				continue
+			}
+			return nil, nil, err
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		resolved = append(resolved, id)
+	}
+	sort.Strings(ignored)
+	return sortTableIDs(resolved), ignored, nil
 }
 
 func tableSet(values []TableID) map[TableID]struct{} {

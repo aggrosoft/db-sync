@@ -8,30 +8,65 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestProfileYAMLRoundTripPreservesDefaults(t *testing.T) {
-	original := model.DefaultProfile("customer-copy")
-	original.Source.Engine = model.EnginePostgres
-	original.Source.DSNTemplate = "postgres://app:${SRC_DB_PASSWORD}@localhost:5432/source?sslmode=disable"
-	original.Target.Engine = model.EnginePostgres
-	original.Target.DSNTemplate = "postgres://app:${TGT_DB_PASSWORD}@localhost:5432/target?sslmode=disable"
-	original.Selection.Tables = []string{"public.orders", "public.order_items"}
-	original.Selection.ExcludedTables = []string{"public.customers"}
-
-	encoded, err := MarshalProfile(original)
-	if err != nil {
-		t.Fatalf("MarshalProfile() error = %v", err)
+func TestNormalizeProfileAppliesDefaultsWithoutName(t *testing.T) {
+	candidate := model.DefaultProfile("")
+	candidate.Source.Engine = model.EnginePostgres
+	candidate.Source.Connection.Mode = model.ConnectionModeDetails
+	candidate.Source.Connection.Details = model.ConnectionDetails{
+		Host:     "localhost",
+		Database: "source",
+		Username: "app",
+		Password: "source-secret",
 	}
+	candidate.Target.Engine = model.EngineMariaDB
+	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Target.Connection.ConnectionString = model.ConnectionString{Value: "dev:dev@tcp(localhost:3307)/target"}
+	candidate.Selection.Tables = []string{"public.orders", "public.orders", " public.order_items "}
+	candidate.Selection.ExcludedTables = []string{"logs", "logs", "   "}
 
-	decoded, err := UnmarshalProfile(encoded)
-	if err != nil {
-		t.Fatalf("UnmarshalProfile() error = %v", err)
-	}
-
-	want, err := NormalizeProfile(original)
+	normalized, err := NormalizeProfile(candidate)
 	if err != nil {
 		t.Fatalf("NormalizeProfile() error = %v", err)
 	}
-	if diff := cmp.Diff(want, decoded); diff != "" {
-		t.Fatalf("round trip mismatch (-want +got):\n%s", diff)
+	if normalized.Name != "" {
+		t.Fatalf("NormalizeProfile().Name = %q, want empty", normalized.Name)
+	}
+	if normalized.Source.Connection.Details.Port != 5432 {
+		t.Fatalf("source port = %d, want 5432", normalized.Source.Connection.Details.Port)
+	}
+	if normalized.Source.Connection.Details.SSLMode != "disable" {
+		t.Fatalf("source sslmode = %q, want disable", normalized.Source.Connection.Details.SSLMode)
+	}
+	if normalized.Target.Connection.Mode != model.ConnectionModeConnectionString {
+		t.Fatalf("target mode = %q, want %q", normalized.Target.Connection.Mode, model.ConnectionModeConnectionString)
+	}
+	if diff := cmp.Diff([]string{"public.orders", "public.order_items"}, normalized.Selection.Tables); diff != "" {
+		t.Fatalf("selection tables mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"logs"}, normalized.Selection.ExcludedTables); diff != "" {
+		t.Fatalf("selection exclusions mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNormalizeProfileRequiresPasswordOrReference(t *testing.T) {
+	candidate := model.DefaultProfile("")
+	candidate.Source.Engine = model.EngineMariaDB
+	candidate.Source.Connection.Mode = model.ConnectionModeDetails
+	candidate.Source.Connection.Details = model.ConnectionDetails{
+		Host:     "localhost",
+		Database: "source",
+		Username: "app",
+	}
+	candidate.Target.Engine = model.EngineMariaDB
+	candidate.Target.Connection.Mode = model.ConnectionModeDetails
+	candidate.Target.Connection.Details = model.ConnectionDetails{
+		Host:     "localhost",
+		Database: "target",
+		Username: "app",
+		Password: "target-secret",
+	}
+
+	if _, err := NormalizeProfile(candidate); err == nil {
+		t.Fatal("NormalizeProfile() error = nil, want password validation error")
 	}
 }

@@ -1,28 +1,39 @@
 package secrets
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestPlaceholderParsingDoesNotExposeResolvedValue(t *testing.T) {
-	resolved, err := ResolveTemplate("postgres://app:${SRC_DB_PASSWORD}@localhost/db", map[string]string{"SRC_DB_PASSWORD": "super-secret"})
+func TestLoadEnvFileParsesAssignments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.env")
+	content := "# comment\nexport DB_SYNC_SOURCE_HOST=localhost\nDB_SYNC_SOURCE_PASSWORD='dev'\nDB_SYNC_TABLES=users,orders\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	env, err := LoadEnvFile(path)
 	if err != nil {
-		t.Fatalf("ResolveTemplate() error = %v", err)
+		t.Fatalf("LoadEnvFile() error = %v", err)
 	}
-	if resolved.String() == "super-secret" || strings.Contains(resolved.String(), "super-secret") {
-		t.Fatalf("resolved template string exposed secret: %q", resolved.String())
+	if env["DB_SYNC_SOURCE_HOST"] != "localhost" {
+		t.Fatalf("source host = %q, want localhost", env["DB_SYNC_SOURCE_HOST"])
 	}
-	if got := resolved.Placeholders(); len(got) != 1 || got[0] != "SRC_DB_PASSWORD" {
-		t.Fatalf("unexpected placeholders: %v", got)
+	if env["DB_SYNC_SOURCE_PASSWORD"] != "dev" {
+		t.Fatalf("source password = %q, want dev", env["DB_SYNC_SOURCE_PASSWORD"])
+	}
+	if env["DB_SYNC_TABLES"] != "users,orders" {
+		t.Fatalf("tables = %q, want users,orders", env["DB_SYNC_TABLES"])
 	}
 }
 
-func TestInvalidPlaceholdersFail(t *testing.T) {
-	tests := []string{"postgres://${db_password}", "postgres://${BAD-NAME}"}
-	for _, input := range tests {
-		if _, err := ParsePlaceholders(input); err == nil {
-			t.Fatalf("ParsePlaceholders(%q) expected error", input)
-		}
+func TestLoadEnvFileRejectsInvalidAssignments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broken.env")
+	if err := os.WriteFile(path, []byte("not-an-assignment\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := LoadEnvFile(path); err == nil {
+		t.Fatal("LoadEnvFile() error = nil, want invalid assignment error")
 	}
 }

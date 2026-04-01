@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"db-sync/internal/model"
-	"db-sync/internal/profile"
 	"db-sync/internal/validate"
 )
 
@@ -30,10 +29,10 @@ func TestDiscoverProfileBlocksMissingEndpointEnvironment(t *testing.T) {
 	candidate := model.DefaultProfile("missing-env")
 	candidate.Source.Engine = model.EnginePostgres
 	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
-	candidate.Source.Connection.ConnectionString.EnvVar = profile.ConnectionStringEnvVar(candidate.Name, "source")
+	candidate.Source.Connection.ConnectionString.EnvVar = "SRC_DSN"
 	candidate.Target.Engine = model.EnginePostgres
 	candidate.Target.Connection.Mode = model.ConnectionModeDetails
-	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Database: "app", Username: "app", PasswordEnv: profile.PasswordEnvVar(candidate.Name, "target"), SSLMode: "disable"}
+	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Database: "app", Username: "app", PasswordEnv: "TGT_PASSWORD", SSLMode: "disable"}
 
 	report, err := service.DiscoverProfile(context.Background(), candidate)
 	if err == nil {

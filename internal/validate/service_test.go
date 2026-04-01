@@ -25,15 +25,14 @@ func (adapter fakeAdapter) ValidateTarget(_ context.Context, _ string, _ model.E
 }
 
 func TestValidateProfileMissingRequiredEnvironmentVariables(t *testing.T) {
-	store := profile.NewFilesystemStore(t.TempDir(), "db-sync")
-	service := NewService(store, func() map[string]string { return map[string]string{} }, Registry{})
+	service := NewService(func() map[string]string { return map[string]string{} }, Registry{})
 	candidate := model.DefaultProfile("missing-env")
 	candidate.Source.Engine = model.EnginePostgres
 	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
-	candidate.Source.Connection.ConnectionString = model.ConnectionString{EnvVar: profile.ConnectionStringEnvVar(candidate.Name, "source")}
+	candidate.Source.Connection.ConnectionString = model.ConnectionString{EnvVar: "SRC_DSN"}
 	candidate.Target.Engine = model.EnginePostgres
 	candidate.Target.Connection.Mode = model.ConnectionModeDetails
-	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "target", Username: "app", PasswordEnv: profile.PasswordEnvVar(candidate.Name, "target"), SSLMode: "disable"}
+	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "target", Username: "app", PasswordEnv: "TGT_PASSWORD", SSLMode: "disable"}
 
 	report, err := service.ValidateProfile(context.Background(), candidate)
 	if err == nil {
@@ -45,8 +44,7 @@ func TestValidateProfileMissingRequiredEnvironmentVariables(t *testing.T) {
 }
 
 func TestValidateProfileConnectionFirstModes(t *testing.T) {
-	store := profile.NewFilesystemStore(t.TempDir(), "db-sync")
-	service := NewService(store, func() map[string]string { return map[string]string{} }, Registry{
+	service := NewService(func() map[string]string { return map[string]string{} }, Registry{
 		model.EnginePostgres: fakeAdapter{
 			source: profile.EndpointValidation{Role: "source", Engine: model.EnginePostgres, Status: profile.StatusPassed},
 			target: profile.EndpointValidation{Role: "target", Engine: model.EnginePostgres, Status: profile.StatusPassed},
@@ -55,10 +53,10 @@ func TestValidateProfileConnectionFirstModes(t *testing.T) {
 	candidate := model.DefaultProfile("connection-first")
 	candidate.Source.Engine = model.EnginePostgres
 	candidate.Source.Connection.Mode = model.ConnectionModeDetails
-	candidate.Source.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "source", Username: "app", Password: "source-secret", PasswordEnv: profile.PasswordEnvVar(candidate.Name, "source"), SSLMode: "disable"}
+	candidate.Source.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "source", Username: "app", Password: "source-secret", SSLMode: "disable"}
 	candidate.Target.Engine = model.EnginePostgres
 	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
-	candidate.Target.Connection.ConnectionString = model.ConnectionString{Value: "postgres://app:target-secret@localhost/target", EnvVar: profile.ConnectionStringEnvVar(candidate.Name, "target")}
+	candidate.Target.Connection.ConnectionString = model.ConnectionString{Value: "postgres://app:target-secret@localhost/target"}
 
 	report, err := service.ValidateProfile(context.Background(), candidate)
 	if err != nil {
@@ -69,33 +67,32 @@ func TestValidateProfileConnectionFirstModes(t *testing.T) {
 	}
 }
 
-func TestValidateAndSaveBlockedSave(t *testing.T) {
-	store := profile.NewFilesystemStore(t.TempDir(), "db-sync")
-	service := NewService(store, func() map[string]string {
-		return map[string]string{profile.ConnectionStringEnvVar("blocked-save", "source"): "postgres://app:source@localhost/source"}
+func TestValidateProfileReturnsBlockedReportForAdapterFailures(t *testing.T) {
+	service := NewService(func() map[string]string {
+		return map[string]string{"SRC_DSN": "postgres://app:source@localhost/source"}
 	}, Registry{
 		model.EnginePostgres: fakeAdapter{
 			source: profile.EndpointValidation{Role: "source", Engine: model.EnginePostgres, Status: profile.StatusPassed},
 			target: profile.EndpointValidation{Role: "target", Engine: model.EnginePostgres, Status: profile.StatusFailed},
-			tgtErr: errors.New("blocked save"),
+			tgtErr: errors.New("blocked validation"),
 		},
 	})
 	candidate := model.DefaultProfile("blocked-save")
 	candidate.Source.Engine = model.EnginePostgres
 	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
-	candidate.Source.Connection.ConnectionString = model.ConnectionString{EnvVar: profile.ConnectionStringEnvVar(candidate.Name, "source")}
+	candidate.Source.Connection.ConnectionString = model.ConnectionString{EnvVar: "SRC_DSN"}
 	candidate.Target.Engine = model.EnginePostgres
 	candidate.Target.Connection.Mode = model.ConnectionModeDetails
-	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "target", Username: "app", Password: "target", PasswordEnv: profile.PasswordEnvVar(candidate.Name, "target"), SSLMode: "disable"}
+	candidate.Target.Connection.Details = model.ConnectionDetails{Host: "localhost", Port: 5432, Database: "target", Username: "app", Password: "target", SSLMode: "disable"}
 
-	report, err := service.ValidateAndSave(context.Background(), candidate)
+	report, err := service.ValidateProfile(context.Background(), candidate)
 	if err == nil {
-		t.Fatal("ValidateAndSave() error = nil, want blocked save")
+		t.Fatal("ValidateProfile() error = nil, want blocked validation")
 	}
-	if report.SavedPath != "" {
-		t.Fatalf("SavedPath = %q, want empty", report.SavedPath)
+	if !report.Blocked {
+		t.Fatal("ValidateProfile() blocked = false, want true")
 	}
-	if _, loadErr := store.Load(context.Background(), candidate.Name); !errors.Is(loadErr, profile.ErrProfileNotFound) {
-		t.Fatalf("Load() error = %v, want ErrProfileNotFound", loadErr)
+	if report.Summary != "blocked validation" {
+		t.Fatalf("Summary = %q, want blocked validation", report.Summary)
 	}
 }

@@ -59,6 +59,9 @@ func TestMariaDBDiscoverSchema(t *testing.T) {
 		t.Fatalf("create invoices error = %v", err)
 	}
 	adapter := NewAdapter()
+	if _, err := adapter.ValidateTarget(ctx, dsn, model.EngineMariaDB); err != nil {
+		t.Fatalf("ValidateTarget() error = %v", err)
+	}
 	snapshot, err := adapter.DiscoverSourceSchema(ctx, dsn, model.EngineMariaDB)
 	if err != nil {
 		t.Fatalf("DiscoverSourceSchema() error = %v", err)
