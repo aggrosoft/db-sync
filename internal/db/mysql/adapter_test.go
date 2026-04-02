@@ -3,6 +3,8 @@ package mysql
 import (
 	"database/sql"
 	"testing"
+
+	"db-sync/internal/schema"
 )
 
 func TestParseReadOnlyValue(t *testing.T) {
@@ -39,5 +41,11 @@ func TestParseReadOnlyValue(t *testing.T) {
 				t.Fatalf("parseReadOnlyValue() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestMySQLTableIDUsesNameOnly(t *testing.T) {
+	if got := mysqlTableID("orders"); got != (schema.TableID{Name: "orders"}) {
+		t.Fatalf("mysqlTableID() = %#v, want name-only table ID", got)
 	}
 }

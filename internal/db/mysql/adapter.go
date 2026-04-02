@@ -194,7 +194,7 @@ func (adapter *Adapter) loadColumns(ctx context.Context, db *sql.DB, databaseNam
 		if err := rows.Scan(&row.tableSchema, &row.tableName, &row.columnName, &row.ordinal, &row.defaultSQL, &row.isNullable, &row.dataType, &row.columnType, &row.columnKey, &row.extra, &row.generationExpression); err != nil {
 			return err
 		}
-		table := ensureTable(tables, schema.TableID{Schema: row.tableSchema, Name: row.tableName})
+		table := ensureTable(tables, mysqlTableID(row.tableName))
 		defaultSQL := ""
 		if row.defaultSQL.Valid {
 			defaultSQL = row.defaultSQL.String
@@ -242,7 +242,7 @@ func (adapter *Adapter) loadPrimaryKeys(ctx context.Context, db *sql.DB, databas
 		if err := rows.Scan(&row.tableSchema, &row.tableName, &row.constraintName, &row.columnName, &row.ordinal); err != nil {
 			return err
 		}
-		table := ensureTable(tables, schema.TableID{Schema: row.tableSchema, Name: row.tableName})
+		table := ensureTable(tables, mysqlTableID(row.tableName))
 		table.PrimaryKey.Name = row.constraintName
 		table.PrimaryKey.Columns = append(table.PrimaryKey.Columns, row.columnName)
 	}
@@ -280,12 +280,16 @@ func (adapter *Adapter) loadForeignKeys(ctx context.Context, db *sql.DB, databas
 		if err := rows.Scan(&row.constraintSchema, &row.constraintName, &row.tableSchema, &row.tableName, &row.columnName, &row.ordinal, &row.referencedTableSchema, &row.referencedTableName, &row.referencedColumnName, &row.updateRule, &row.deleteRule); err != nil {
 			return err
 		}
-		table := ensureTable(tables, schema.TableID{Schema: row.tableSchema, Name: row.tableName})
-		foreignKey := findOrAppendForeignKey(table, row.constraintName, schema.TableID{Schema: row.referencedTableSchema, Name: row.referencedTableName}, row.updateRule, row.deleteRule)
+		table := ensureTable(tables, mysqlTableID(row.tableName))
+		foreignKey := findOrAppendForeignKey(table, row.constraintName, mysqlTableID(row.referencedTableName), row.updateRule, row.deleteRule)
 		foreignKey.Columns = append(foreignKey.Columns, row.columnName)
 		foreignKey.ReferencedColumns = append(foreignKey.ReferencedColumns, row.referencedColumnName)
 	}
 	return rows.Err()
+}
+
+func mysqlTableID(name string) schema.TableID {
+	return schema.TableID{Name: name}
 }
 
 func ensureTable(tables map[string]*schema.Table, id schema.TableID) *schema.Table {

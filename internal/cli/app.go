@@ -58,6 +58,26 @@ type App struct {
 	env        map[string]string
 }
 
+type renderedError struct {
+	err error
+}
+
+func (err renderedError) Error() string {
+	if err.err == nil {
+		return ""
+	}
+	return err.err.Error()
+}
+
+func (err renderedError) Unwrap() error {
+	return err.err
+}
+
+func IsRenderedError(err error) bool {
+	var rendered renderedError
+	return errors.As(err, &rendered)
+}
+
 func NewApp(stdout io.Writer, stderr io.Writer) *App {
 	app := &App{
 		stdout: stdout,
@@ -181,7 +201,10 @@ func (app *App) analyzeEnvironment(ctx context.Context) (Analysis, error) {
 	}
 	validationReport, err := app.validator.ValidateProfile(ctx, candidate)
 	if err != nil {
-		return Analysis{Candidate: candidate, Validation: validationReport}, err
+		if renderErr := RenderValidationReport(app.stderr, validationReport); renderErr != nil {
+			return Analysis{Candidate: candidate, Validation: validationReport}, renderErr
+		}
+		return Analysis{Candidate: candidate, Validation: validationReport}, renderedError{err: err}
 	}
 	discoveryReport, err := app.discoverer.DiscoverProfile(ctx, candidate)
 	if err != nil {

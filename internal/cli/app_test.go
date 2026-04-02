@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -203,5 +204,142 @@ func TestRunFromEnvironmentPassesDryRunToRunner(t *testing.T) {
 	}
 	if strings.Contains(output, "Selected tables") {
 		t.Fatalf("stdout = %q, want run output without analysis preview", output)
+	}
+}
+
+func TestAnalyzeFromEnvironmentRendersValidationFailureAndStops(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	validator := &fakeValidator{
+		report: profile.ValidationReport{
+			Source: profile.EndpointValidation{
+				Role:   "source",
+				Engine: model.EnginePostgres,
+				Status: profile.StatusFailed,
+				Checks: []profile.CheckResult{{Name: "authentication", Status: profile.StatusFailed, Detail: "dial tcp 127.0.0.1:5432: connect: connection refused"}},
+			},
+			Target: profile.EndpointValidation{
+				Role:   "target",
+				Engine: model.EngineMySQL,
+				Status: profile.StatusPassed,
+				Checks: []profile.CheckResult{{Name: "authentication", Status: profile.StatusPassed, Detail: "connection established"}},
+			},
+			Blocked: true,
+			Summary: "dial tcp 127.0.0.1:5432: connect: connection refused",
+		},
+		err: errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	}
+	discoverer := &fakeDiscoverer{}
+	app := NewApp(stdout, stderr)
+	app.SetEnvironment(map[string]string{
+		"DB_SYNC_SOURCE_HOST":     "localhost",
+		"DB_SYNC_SOURCE_PORT":     "5432",
+		"DB_SYNC_SOURCE_USER":     "dev",
+		"DB_SYNC_SOURCE_PASSWORD": "dev",
+		"DB_SYNC_SOURCE_DB":       "db",
+		"DB_SYNC_TARGET_HOST":     "localhost",
+		"DB_SYNC_TARGET_PORT":     "3307",
+		"DB_SYNC_TARGET_USER":     "dev",
+		"DB_SYNC_TARGET_PASSWORD": "dev",
+		"DB_SYNC_TARGET_DB":       "db",
+		"DB_SYNC_TABLES":          "users",
+	})
+	app.SetValidator(validator)
+	app.SetDiscoverer(discoverer)
+
+	err := app.AnalyzeFromEnvironment(context.Background())
+	if err == nil {
+		t.Fatal("AnalyzeFromEnvironment() error = nil, want validation error")
+	}
+	if !IsRenderedError(err) {
+		t.Fatalf("AnalyzeFromEnvironment() error = %T, want rendered error", err)
+	}
+	if len(discoverer.inputs) != 0 {
+		t.Fatalf("DiscoverProfile calls = %d, want 0", len(discoverer.inputs))
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+	output := stderr.String()
+	for _, want := range []string{"Source [postgres]: failed", "authentication: failed", "Target [mysql]: passed", "dial tcp 127.0.0.1:5432: connect: connection refused"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stderr = %q, want substring %q", output, want)
+		}
+	}
+	for _, unwanted := range []string{"Selected tables", "Drift details"} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("stderr = %q, want output without %q", output, unwanted)
+		}
+	}
+}
+
+func TestRunFromEnvironmentRendersValidationFailureAndStops(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	validator := &fakeValidator{
+		report: profile.ValidationReport{
+			Source: profile.EndpointValidation{
+				Role:   "source",
+				Engine: model.EnginePostgres,
+				Status: profile.StatusPassed,
+				Checks: []profile.CheckResult{{Name: "authentication", Status: profile.StatusPassed, Detail: "connection established"}},
+			},
+			Target: profile.EndpointValidation{
+				Role:   "target",
+				Engine: model.EngineMySQL,
+				Status: profile.StatusFailed,
+				Checks: []profile.CheckResult{{Name: "target capability", Status: profile.StatusFailed, Detail: "target is read-only"}},
+			},
+			Blocked: true,
+			Summary: "target is read-only",
+		},
+		err: errors.New("target is read-only"),
+	}
+	discoverer := &fakeDiscoverer{}
+	runner := &fakeRunner{}
+	app := NewApp(stdout, stderr)
+	app.SetEnvironment(map[string]string{
+		"DB_SYNC_SOURCE_HOST":     "localhost",
+		"DB_SYNC_SOURCE_PORT":     "5432",
+		"DB_SYNC_SOURCE_USER":     "dev",
+		"DB_SYNC_SOURCE_PASSWORD": "dev",
+		"DB_SYNC_SOURCE_DB":       "db",
+		"DB_SYNC_TARGET_HOST":     "localhost",
+		"DB_SYNC_TARGET_PORT":     "3307",
+		"DB_SYNC_TARGET_USER":     "dev",
+		"DB_SYNC_TARGET_PASSWORD": "dev",
+		"DB_SYNC_TARGET_DB":       "db",
+		"DB_SYNC_TABLES":          "users",
+	})
+	app.SetValidator(validator)
+	app.SetDiscoverer(discoverer)
+	app.SetRunner(runner)
+
+	err := app.RunFromEnvironment(context.Background(), false)
+	if err == nil {
+		t.Fatal("RunFromEnvironment() error = nil, want validation error")
+	}
+	if !IsRenderedError(err) {
+		t.Fatalf("RunFromEnvironment() error = %T, want rendered error", err)
+	}
+	if len(discoverer.inputs) != 0 {
+		t.Fatalf("DiscoverProfile calls = %d, want 0", len(discoverer.inputs))
+	}
+	if len(runner.inputs) != 0 {
+		t.Fatalf("RunProfile calls = %d, want 0", len(runner.inputs))
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+	output := stderr.String()
+	for _, want := range []string{"Source [postgres]: passed", "Target [mysql]: failed", "target capability: failed", "target is read-only"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stderr = %q, want substring %q", output, want)
+		}
+	}
+	for _, unwanted := range []string{"Selected tables", "Sync executed", "Sync dry-run"} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("stderr = %q, want output without %q", output, unwanted)
+		}
 	}
 }

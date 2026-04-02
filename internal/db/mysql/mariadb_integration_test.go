@@ -66,7 +66,7 @@ func TestMariaDBDiscoverSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverSourceSchema() error = %v", err)
 	}
-	if _, ok := snapshot.TableByID(schema.ParseTableID("app.invoices")); !ok {
+	if _, ok := snapshot.TableByID(schema.ParseTableID("invoices")); !ok {
 		t.Fatal("expected invoices table in MariaDB discovery snapshot")
 	}
 }

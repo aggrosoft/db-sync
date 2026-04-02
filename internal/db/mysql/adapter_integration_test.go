@@ -27,15 +27,15 @@ func TestMySQLDiscoverSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverSourceSchema() error = %v", err)
 	}
-	orders := mustFindMySQLTable(t, snapshot, "app.orders")
+	orders := mustFindMySQLTable(t, snapshot, "orders")
 	if len(orders.Columns) != 4 {
 		t.Fatalf("orders columns = %d, want 4", len(orders.Columns))
 	}
 	if len(orders.ForeignKeys) != 1 {
 		t.Fatalf("orders foreign keys = %d, want 1", len(orders.ForeignKeys))
 	}
-	if got := orders.ForeignKeys[0].ReferencedTable.String(); got != "app.accounts" {
-		t.Fatalf("referenced table = %q, want app.accounts", got)
+	if got := orders.ForeignKeys[0].ReferencedTable.String(); got != "accounts" {
+		t.Fatalf("referenced table = %q, want accounts", got)
 	}
 }
 
