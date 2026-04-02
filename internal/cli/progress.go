@@ -32,6 +32,10 @@ func newRunProgressBar(writer io.Writer, total int, dryRun bool) *runProgressBar
 }
 
 func (bar *runProgressBar) Advance(update syncapp.ProgressUpdate) {
+	if update.Phase != "" {
+		bar.renderPhase(update)
+		return
+	}
 	if !bar.enabled {
 		return
 	}
@@ -75,6 +79,24 @@ func (bar *runProgressBar) Advance(update syncapp.ProgressUpdate) {
 		bar.active = false
 		bar.lastLen = 0
 	}
+}
+
+func (bar *runProgressBar) renderPhase(update syncapp.ProgressUpdate) {
+	bar.mutex.Lock()
+	defer bar.mutex.Unlock()
+	if bar.active {
+		_, _ = fmt.Fprint(bar.writer, "\n")
+		bar.active = false
+		bar.lastLen = 0
+	}
+	line := fmt.Sprintf("Phase: %s", update.Phase)
+	if update.Completed > 0 && update.Total > 0 {
+		line += fmt.Sprintf(" (%d/%d)", update.Completed, update.Total)
+	}
+	if update.Detail != "" {
+		line += " - " + update.Detail
+	}
+	_, _ = fmt.Fprintln(bar.writer, truncateProgressLine(line, progressLineLimit(bar.writer)))
 }
 
 func (bar *runProgressBar) Finish() {

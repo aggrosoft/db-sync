@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"strings"
 	"testing"
 
 	"db-sync/internal/schema"
@@ -22,7 +23,7 @@ func TestSharedWritableColumnsSkipsNonPrimaryIdentityColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sharedWritableColumns() error = %v", err)
 	}
-	if got, want := columnNames(columns), []string{"id", "name"}; !sameColumnNames(got, want) {
+	if got, want := testColumnNames(columns), []string{"id", "name"}; !sameColumnNames(got, want) {
 		t.Fatalf("columns = %v, want %v", got, want)
 	}
 }
@@ -42,12 +43,12 @@ func TestSharedWritableColumnsKeepsPrimaryKeyIdentityColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sharedWritableColumns() error = %v", err)
 	}
-	if got, want := columnNames(columns), []string{"id", "email"}; !sameColumnNames(got, want) {
+	if got, want := testColumnNames(columns), []string{"id", "email"}; !sameColumnNames(got, want) {
 		t.Fatalf("columns = %v, want %v", got, want)
 	}
 }
 
-func columnNames(columns []schema.Column) []string {
+func testColumnNames(columns []schema.Column) []string {
 	result := make([]string, 0, len(columns))
 	for _, column := range columns {
 		result = append(result, column.Name)
@@ -65,4 +66,67 @@ func sameColumnNames(left []string, right []string) bool {
 		}
 	}
 	return true
+}
+
+func TestDisplaySyncTable(t *testing.T) {
+	if got := displaySyncTable(schema.TableID{Name: "customer"}, "explicit"); got != "customer [explicit]" {
+		t.Fatalf("displaySyncTable() = %q, want customer [explicit]", got)
+	}
+	if got := displaySyncTable(schema.TableID{Schema: "public", Name: "users"}, "implicit"); strings.Contains(got, "public.") {
+		t.Fatalf("displaySyncTable() = %q, want display name without schema prefix", got)
+	}
+}
+
+func TestBuildDeleteBatchQueryMySQL(t *testing.T) {
+	query, args := buildDeleteBatchQuery(mysqlDialect{}, schema.TableID{Name: "orders"}, []string{"id"}, [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	want := "delete from `orders` where (`id` = ?) or (`id` = ?) or (`id` = ?)"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+	if len(args) != 3 || args[0] != int64(1) || args[1] != int64(2) || args[2] != int64(3) {
+		t.Fatalf("args = %#v, want [1 2 3]", args)
+	}
+}
+
+func TestBuildDeleteBatchQueryPostgresCompositeKey(t *testing.T) {
+	query, args := buildDeleteBatchQuery(postgresDialect{}, schema.TableID{Schema: "public", Name: "category"}, []string{"id", "version_id"}, [][]any{{"a", "live"}, {"b", "draft"}})
+	want := "delete from \"public\".\"category\" where (\"id\" = $1 and \"version_id\" = $2) or (\"id\" = $3 and \"version_id\" = $4)"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+	if len(args) != 4 || args[0] != "a" || args[1] != "live" || args[2] != "b" || args[3] != "draft" {
+		t.Fatalf("args = %#v, want composite key args", args)
+	}
+}
+
+func TestBuildInsertBatchQueryMySQL(t *testing.T) {
+	query, args := buildInsertBatchQuery(mysqlDialect{}, schema.TableID{Name: "tmp_keys"}, []schema.Column{{Name: "id"}, {Name: "version_id"}}, [][]any{{"a", "live"}, {"b", "draft"}})
+	want := "insert into `tmp_keys` (`id`, `version_id`) values (?, ?), (?, ?)"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+	if len(args) != 4 || args[0] != "a" || args[1] != "live" || args[2] != "b" || args[3] != "draft" {
+		t.Fatalf("args = %#v, want insert args", args)
+	}
+}
+
+func TestBuildMirrorDeleteQueries(t *testing.T) {
+	countQuery := buildCountMirrorDeleteQuery(postgresDialect{}, schema.TableID{Schema: "public", Name: "orders"}, "tmp_orders", []string{"id"})
+	wantCount := "select count(*) from \"public\".\"orders\" as target where not exists (select 1 from \"tmp_orders\" as source_keys where \"target\".\"id\" = \"source_keys\".\"id\")"
+	if countQuery != wantCount {
+		t.Fatalf("countQuery = %q, want %q", countQuery, wantCount)
+	}
+	deleteQuery := buildMirrorDeleteQuery(mysqlDialect{}, schema.TableID{Name: "orders"}, "tmp_orders", []string{"id"})
+	wantDelete := "delete target from `orders` as target where not exists (select 1 from `tmp_orders` as source_keys where `target`.`id` = `source_keys`.`id`)"
+	if deleteQuery != wantDelete {
+		t.Fatalf("deleteQuery = %q, want %q", deleteQuery, wantDelete)
+	}
+}
+
+func TestBuildCreateMirrorDeleteTempTableQuery(t *testing.T) {
+	query := buildCreateMirrorDeleteTempTableQuery(mysqlDialect{}, schema.TableID{Name: "orders"}, "tmp_orders", []schema.Column{{Name: "id"}, {Name: "version_id"}})
+	want := "create temporary table `tmp_orders` as select `id`, `version_id` from `orders` where 1 = 0"
+	if query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
 }
