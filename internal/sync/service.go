@@ -480,6 +480,78 @@ func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sou
 			return tableState{}, fmt.Errorf("table %s primary key column %s is not writable on the target", sourceTable.ID.String(), keyColumn)
 		}
 	}
+	selfReferences := selfReferencingForeignKeys(sourceTable, columns)
+	if enforceSelfReferenceOrdering && len(selfReferences) > 0 {
+		return syncTableInMemory(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, selfReferences, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
+	}
+	return syncTableViaStage(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, allowUpdate, scope, dryRun)
+}
+
+func syncTableViaStage(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, allowUpdate bool, scope string, dryRun bool) (tableState, error) {
+	tempTableName := nextSyncTempTableName(targetTable.ID)
+	if err := createReplaceTempTable(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, columns, sourceTable.PrimaryKey.Columns); err != nil {
+		return tableState{}, err
+	}
+	defer func() {
+		_ = dropMirrorDeleteTempTable(context.Background(), targetDB, targetDialect, tempTableName)
+	}()
+
+	sourceRowCount, err := stageSourceRows(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, tempTableName, columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	missingRows, err := countMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	updateColumns := nonPrimaryKeyColumns(columns, sourceTable.PrimaryKey.Columns)
+	updatedRows := 0
+	if allowUpdate {
+		updatedRows, err = countChangedStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, updateColumns, sourceTable.PrimaryKey.Columns)
+		if err != nil {
+			return tableState{}, err
+		}
+	}
+
+	state := tableState{
+		report: TableReport{
+			TableID:      sourceTable.ID,
+			Scope:        scope,
+			SourceRows:   sourceRowCount,
+			MissingRows:  missingRows,
+			InsertedRows: missingRows,
+			UpdatedRows:  updatedRows,
+		},
+		table:         sourceTable,
+		columns:       columns,
+		primaryKey:    append([]string(nil), sourceTable.PrimaryKey.Columns...),
+		sourceSeen:    map[string]struct{}{},
+		targetRows:    map[string][]any{},
+		targetDialect: targetDialect,
+	}
+	if dryRun {
+		return state, nil
+	}
+
+	insertedRows, err := insertMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, columns, sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	if allowUpdate {
+		updatedRows, err = updateChangedStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, updateColumns, sourceTable.PrimaryKey.Columns)
+		if err != nil {
+			return tableState{}, err
+		}
+	}
+	state.report.InsertedRows = insertedRows
+	state.report.UpdatedRows = updatedRows
+	if state.report.InsertedRows != state.report.MissingRows {
+		return tableState{}, fmt.Errorf("table %s inserted %d rows but expected %d", targetTable.ID.String(), state.report.InsertedRows, state.report.MissingRows)
+	}
+	return state, nil
+}
+
+func syncTableInMemory(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, selfReferences []schema.ForeignKey, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
 	targetRows, err := loadTargetRows(ctx, targetDB, targetDialect, targetTable, columns)
 	if err != nil {
 		return tableState{}, err
@@ -518,7 +590,6 @@ func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sou
 		targetRows:    targetRows,
 		targetDialect: targetDialect,
 	}
-	selfReferences := selfReferencingForeignKeys(sourceTable, columns)
 	pending := make([]syncAction, 0)
 	for rows.Next() {
 		values, err := scanRowValues(rows, columns)
@@ -1029,6 +1100,10 @@ func nextMirrorDeleteTempTableName(tableID schema.TableID) string {
 
 func nextReplaceTempTableName(tableID schema.TableID) string {
 	return nextTempTableName("db_sync_replace", tableID)
+}
+
+func nextSyncTempTableName(tableID schema.TableID) string {
+	return nextTempTableName("db_sync_sync", tableID)
 }
 
 func nextTempTableName(prefix string, tableID schema.TableID) string {
