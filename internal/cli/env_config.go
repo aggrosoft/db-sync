@@ -29,6 +29,7 @@ const (
 	tablesKey        = "DB_SYNC_TABLES"
 	excludeTablesKey = "DB_SYNC_EXCLUDE_TABLES"
 	mirrorDeleteKey  = "DB_SYNC_MIRROR_DELETE"
+	mergeTablesKey   = "DB_SYNC_MERGE_TABLES"
 )
 
 func LoadProfileFromEnvironment(env map[string]string) (model.Profile, error) {
@@ -50,6 +51,7 @@ func LoadProfileFromEnvironment(env map[string]string) (model.Profile, error) {
 	candidate.Target = target
 	candidate.Selection.Tables = schema.ParseSelectionInput(env[tablesKey])
 	candidate.Selection.ExcludedTables = schema.ParseSelectionInput(env[excludeTablesKey])
+	candidate.Sync.MergeTables = schema.ParseSelectionInput(env[mergeTablesKey])
 	mirrorDelete, err := parseBool(env[mirrorDeleteKey], false, mirrorDeleteKey)
 	if err != nil {
 		return model.Profile{}, err

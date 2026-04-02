@@ -49,7 +49,8 @@ type Selection struct {
 }
 
 type SyncOptions struct {
-	MirrorDelete bool `yaml:"mirror_delete"`
+	MirrorDelete bool     `yaml:"mirror_delete"`
+	MergeTables  []string `yaml:"merge_tables,omitempty"`
 }
 
 type Profile struct {
@@ -71,6 +72,7 @@ func DefaultProfile(name string) Profile {
 		},
 		Sync: SyncOptions{
 			MirrorDelete: false,
+			MergeTables:  []string{},
 		},
 	}
 }

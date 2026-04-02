@@ -20,6 +20,7 @@ func NormalizeProfile(profile model.Profile) (model.Profile, error) {
 	}
 	profile.Selection.Tables = normalizeSelectionValues(profile.Selection.Tables)
 	profile.Selection.ExcludedTables = normalizeSelectionValues(profile.Selection.ExcludedTables)
+	profile.Sync.MergeTables = normalizeSelectionValues(profile.Sync.MergeTables)
 	return profile, nil
 }
 

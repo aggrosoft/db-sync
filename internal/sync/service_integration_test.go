@@ -267,6 +267,153 @@ func TestRunProfileIntegrationMirrorDeleteRunsBeforeInsert(t *testing.T) {
 	assertStringRows(t, targetDB, `select cast(id as char), external_number, payload from entries order by id`, [][]string{{"1", "A-100", "alpha"}, {"2", "B-200", "beta"}})
 }
 
+func TestRunProfileIntegrationExplicitTablesDefaultToReplace(t *testing.T) {
+	ctx := context.Background()
+	sourceContainer := testkit.StartMySQLContainer(ctx, t)
+	defer sourceContainer.Cleanup()
+	targetContainer := testkit.StartMySQLContainer(ctx, t)
+	defer targetContainer.Cleanup()
+
+	sourceDSN := strings.ReplaceAll(sourceContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	targetDSN := strings.ReplaceAll(targetContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	sourceDB := openMySQLForTest(t, sourceDSN)
+	defer sourceDB.Close()
+	targetDB := openMySQLForTest(t, targetDSN)
+	defer targetDB.Close()
+
+	applyStatements(t, sourceDB,
+		`create table entries (id int primary key, payload varchar(255) not null)`,
+		`insert into entries (id, payload) values (1, 'alpha'), (2, 'beta')`,
+	)
+	applyStatements(t, targetDB,
+		`create table entries (id int primary key, payload varchar(255) not null)`,
+		`insert into entries (id, payload) values (1, 'stale alpha'), (9, 'ghost')`,
+	)
+
+	adapter := mysqladapter.NewAdapter()
+	sourceSnapshot, err := adapter.DiscoverSourceSchema(ctx, sourceDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverSourceSchema() error = %v", err)
+	}
+	targetSnapshot, err := adapter.DiscoverTargetSchema(ctx, targetDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverTargetSchema() error = %v", err)
+	}
+
+	candidate := model.DefaultProfile("integration")
+	candidate.Source.Engine = model.EngineMySQL
+	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Source.Connection.ConnectionString.Value = sourceDSN
+	candidate.Target.Engine = model.EngineMySQL
+	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Target.Connection.ConnectionString.Value = targetDSN
+	candidate.Selection.Tables = []string{"entries"}
+
+	preview, err := schema.PreviewSelection(schema.BuildDependencyGraph(sourceSnapshot), candidate.Selection.Tables, candidate.Selection.ExcludedTables)
+	if err != nil {
+		t.Fatalf("PreviewSelection() error = %v", err)
+	}
+	analysis := integrationAnalysis{
+		preview: preview,
+		discovery: schema.DiscoveryReport{
+			Source: schema.EndpointDiscovery{Role: "source", Engine: model.EngineMySQL, Snapshot: sourceSnapshot},
+			Target: schema.EndpointDiscovery{Role: "target", Engine: model.EngineMySQL, Snapshot: targetSnapshot},
+		},
+		drift: schema.CompareSnapshots(filterSnapshot(sourceSnapshot, preview.FinalTables), filterSnapshot(targetSnapshot, preview.FinalTables)),
+	}
+
+	service := NewService(func() map[string]string { return map[string]string{} })
+	report, err := service.RunProfile(ctx, candidate, analysis, false, nil)
+	if err != nil {
+		t.Fatalf("RunProfile() error = %v", err)
+	}
+	if report.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", report.InsertedRows)
+	}
+	if report.UpdatedRows != 1 {
+		t.Fatalf("UpdatedRows = %d, want 1", report.UpdatedRows)
+	}
+	if report.DeletedRows != 1 {
+		t.Fatalf("DeletedRows = %d, want 1", report.DeletedRows)
+	}
+
+	assertStringRows(t, targetDB, `select cast(id as char), payload from entries order by id`, [][]string{{"1", "alpha"}, {"2", "beta"}})
+}
+
+func TestRunProfileIntegrationMergeTablesKeepTargetOnlyRows(t *testing.T) {
+	ctx := context.Background()
+	sourceContainer := testkit.StartMySQLContainer(ctx, t)
+	defer sourceContainer.Cleanup()
+	targetContainer := testkit.StartMySQLContainer(ctx, t)
+	defer targetContainer.Cleanup()
+
+	sourceDSN := strings.ReplaceAll(sourceContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	targetDSN := strings.ReplaceAll(targetContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	sourceDB := openMySQLForTest(t, sourceDSN)
+	defer sourceDB.Close()
+	targetDB := openMySQLForTest(t, targetDSN)
+	defer targetDB.Close()
+
+	applyStatements(t, sourceDB,
+		`create table entries (id int primary key, payload varchar(255) not null)`,
+		`insert into entries (id, payload) values (1, 'alpha'), (2, 'beta')`,
+	)
+	applyStatements(t, targetDB,
+		`create table entries (id int primary key, payload varchar(255) not null)`,
+		`insert into entries (id, payload) values (1, 'stale alpha'), (9, 'ghost')`,
+	)
+
+	adapter := mysqladapter.NewAdapter()
+	sourceSnapshot, err := adapter.DiscoverSourceSchema(ctx, sourceDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverSourceSchema() error = %v", err)
+	}
+	targetSnapshot, err := adapter.DiscoverTargetSchema(ctx, targetDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverTargetSchema() error = %v", err)
+	}
+
+	candidate := model.DefaultProfile("integration")
+	candidate.Source.Engine = model.EngineMySQL
+	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Source.Connection.ConnectionString.Value = sourceDSN
+	candidate.Target.Engine = model.EngineMySQL
+	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Target.Connection.ConnectionString.Value = targetDSN
+	candidate.Selection.Tables = []string{"entries"}
+	candidate.Sync.MergeTables = []string{"entries"}
+
+	preview, err := schema.PreviewSelection(schema.BuildDependencyGraph(sourceSnapshot), candidate.Selection.Tables, candidate.Selection.ExcludedTables)
+	if err != nil {
+		t.Fatalf("PreviewSelection() error = %v", err)
+	}
+	analysis := integrationAnalysis{
+		preview: preview,
+		discovery: schema.DiscoveryReport{
+			Source: schema.EndpointDiscovery{Role: "source", Engine: model.EngineMySQL, Snapshot: sourceSnapshot},
+			Target: schema.EndpointDiscovery{Role: "target", Engine: model.EngineMySQL, Snapshot: targetSnapshot},
+		},
+		drift: schema.CompareSnapshots(filterSnapshot(sourceSnapshot, preview.FinalTables), filterSnapshot(targetSnapshot, preview.FinalTables)),
+	}
+
+	service := NewService(func() map[string]string { return map[string]string{} })
+	report, err := service.RunProfile(ctx, candidate, analysis, false, nil)
+	if err != nil {
+		t.Fatalf("RunProfile() error = %v", err)
+	}
+	if report.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", report.InsertedRows)
+	}
+	if report.UpdatedRows != 1 {
+		t.Fatalf("UpdatedRows = %d, want 1", report.UpdatedRows)
+	}
+	if report.DeletedRows != 0 {
+		t.Fatalf("DeletedRows = %d, want 0", report.DeletedRows)
+	}
+
+	assertStringRows(t, targetDB, `select cast(id as char), payload from entries order by id`, [][]string{{"1", "alpha"}, {"2", "beta"}, {"9", "ghost"}})
+}
+
 func TestRunProfileIntegrationSkipsNonPrimaryAutoIncrementColumns(t *testing.T) {
 	ctx := context.Background()
 	sourceContainer := testkit.StartMySQLContainer(ctx, t)
@@ -308,6 +455,7 @@ func TestRunProfileIntegrationSkipsNonPrimaryAutoIncrementColumns(t *testing.T) 
 	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
 	candidate.Target.Connection.ConnectionString.Value = targetDSN
 	candidate.Selection.Tables = []string{"category"}
+	candidate.Sync.MergeTables = []string{"category"}
 
 	preview, err := schema.PreviewSelection(schema.BuildDependencyGraph(sourceSnapshot), candidate.Selection.Tables, candidate.Selection.ExcludedTables)
 	if err != nil {

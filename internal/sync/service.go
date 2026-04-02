@@ -167,6 +167,11 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 
 	report := Report{DryRun: dryRun, Tables: make([]TableReport, 0, len(preview.FinalTables))}
 	explicitSet := tableSet(preview.ExplicitIncludes)
+	mergeTables, err := resolveConfiguredTableIDs(preview.ExplicitIncludes, candidate.Sync.MergeTables, "merge")
+	if err != nil {
+		return report, err
+	}
+	mergeSet := tableSet(mergeTables)
 	explicitTables := make([]schema.TableID, 0, len(preview.FinalTables))
 	for _, tableID := range preview.FinalTables {
 		if _, ok := explicitSet[tableID]; ok {
@@ -177,6 +182,9 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 	deleteCounts := make(map[schema.TableID]int, len(preview.ExplicitIncludes))
 	if candidate.Sync.MirrorDelete {
 		for index, tableID := range explicitTables {
+			if _, merge := mergeSet[tableID]; !merge {
+				continue
+			}
 			if progress != nil {
 				progress(ProgressUpdate{Phase: "scanning delete candidates", Detail: displaySyncTable(tableID, "explicit"), Completed: index + 1, Total: len(explicitTables), TableID: tableID, Scope: "explicit", DryRun: dryRun})
 			}
@@ -248,10 +256,10 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 			return report, fmt.Errorf("selected target table %s is not available", tableID.String())
 		}
 		scope := "implicit"
-		allowUpdate := false
+		mergeMode := false
 		if _, ok := explicitSet[tableID]; ok {
 			scope = "explicit"
-			allowUpdate = true
+			_, mergeMode = mergeSet[tableID]
 		}
 		if progress != nil {
 			progress(ProgressUpdate{Phase: "syncing table", Detail: displaySyncTable(tableID, scope), Completed: index + 1, Total: totalTables, TableID: tableID, Scope: scope, DryRun: dryRun})
@@ -265,7 +273,12 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 			}
 			tableExecutor = tableTx
 		}
-		state, err := syncTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
+		state, err := tableState{}, error(nil)
+		if scope == "explicit" && !mergeMode {
+			state, err = replaceTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, scope, dryRun, enforceSelfReferenceOrdering)
+		} else {
+			state, err = syncTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, mergeMode, scope, dryRun, enforceSelfReferenceOrdering)
+		}
 		if err != nil {
 			if tableTx != nil {
 				_ = tableTx.Rollback()
@@ -370,6 +383,84 @@ func inspectTableForDelete(ctx context.Context, sourceDB *sql.DB, sourceDialect 
 		return deletePlan{}, err
 	}
 	return deletePlan{table: targetTable, primaryKey: append([]string(nil), targetTable.PrimaryKey.Columns...), tempTableName: tempTableName, candidateCount: candidateCount}, nil
+}
+
+func replaceTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
+	if len(sourceTable.PrimaryKey.Columns) == 0 {
+		return tableState{}, fmt.Errorf("table %s has no primary key; sync requires primary keys", sourceTable.ID.String())
+	}
+	columns, err := sharedWritableColumns(sourceTable, targetTable)
+	if err != nil {
+		return tableState{}, err
+	}
+	tempTableName := nextReplaceTempTableName(targetTable.ID)
+	if err := createReplaceTempTable(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, columns, sourceTable.PrimaryKey.Columns); err != nil {
+		return tableState{}, err
+	}
+	defer func() {
+		_ = dropMirrorDeleteTempTable(context.Background(), targetDB, targetDialect, tempTableName)
+	}()
+
+	sourceRowCount, err := stageSourceRows(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, tempTableName, columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	missingRows, err := countMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	updatedRows, err := countChangedStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, nonPrimaryKeyColumns(columns, sourceTable.PrimaryKey.Columns), sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	deletedRows, err := countMirrorDeleteRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+
+	state := tableState{
+		report: TableReport{
+			TableID:      sourceTable.ID,
+			Scope:        scope,
+			SourceRows:   sourceRowCount,
+			MissingRows:  missingRows,
+			InsertedRows: missingRows,
+			UpdatedRows:  updatedRows,
+			DeletedRows:  deletedRows,
+		},
+		table:         sourceTable,
+		columns:       columns,
+		primaryKey:    append([]string(nil), sourceTable.PrimaryKey.Columns...),
+		sourceSeen:    map[string]struct{}{},
+		targetRows:    map[string][]any{},
+		targetDialect: targetDialect,
+	}
+	if dryRun {
+		return state, nil
+	}
+
+	deletedRows, err = deleteMissingRows(ctx, targetDB, targetDialect, deletePlan{table: targetTable, primaryKey: append([]string(nil), sourceTable.PrimaryKey.Columns...), tempTableName: tempTableName, candidateCount: deletedRows}, false)
+	if err != nil {
+		return tableState{}, err
+	}
+	insertedRows, err := insertMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, columns, sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	updatedRows, err = updateChangedStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, nonPrimaryKeyColumns(columns, sourceTable.PrimaryKey.Columns), sourceTable.PrimaryKey.Columns)
+	if err != nil {
+		return tableState{}, err
+	}
+	state.report.InsertedRows = insertedRows
+	state.report.UpdatedRows = updatedRows
+	state.report.DeletedRows = deletedRows
+	if state.report.InsertedRows != state.report.MissingRows {
+		return tableState{}, fmt.Errorf("table %s inserted %d rows but expected %d", targetTable.ID.String(), state.report.InsertedRows, state.report.MissingRows)
+	}
+	if state.report.UpdatedRows != updatedRows {
+		return tableState{}, fmt.Errorf("table %s updated %d rows but expected %d", targetTable.ID.String(), state.report.UpdatedRows, updatedRows)
+	}
+	return state, nil
 }
 
 func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
@@ -525,6 +616,14 @@ func shouldEnforceSelfReferenceOrdering(dryRun bool, engine model.Engine) bool {
 	default:
 		return true
 	}
+}
+
+func countTableRows(ctx context.Context, db sqlExecutor, dialect dialect, tableID schema.TableID) (int, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, buildCountTableRowsQuery(dialect, tableID)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count target rows for %s: %w", tableID.String(), err)
+	}
+	return count, nil
 }
 
 func loadTargetRows(ctx context.Context, db sqlExecutor, dialect dialect, table schema.Table, columns []schema.Column) (map[string][]any, error) {
@@ -768,6 +867,14 @@ func buildDeleteQuery(dialect dialect, tableID schema.TableID, primaryKey []stri
 	return fmt.Sprintf("delete from %s where %s", qualifyTable(dialect, tableID), strings.Join(whereParts, " and "))
 }
 
+func buildDeleteAllQuery(dialect dialect, tableID schema.TableID) string {
+	return fmt.Sprintf("delete from %s", qualifyTable(dialect, tableID))
+}
+
+func buildCountTableRowsQuery(dialect dialect, tableID schema.TableID) string {
+	return fmt.Sprintf("select count(*) from %s", qualifyTable(dialect, tableID))
+}
+
 func buildDeleteBatchQuery(dialect dialect, tableID schema.TableID, primaryKey []string, rows [][]any) (string, []any) {
 	clauses := make([]string, 0, len(rows))
 	args := make([]any, 0, len(rows)*len(primaryKey))
@@ -804,7 +911,7 @@ func buildInsertBatchQuery(dialect dialect, tableID schema.TableID, columns []sc
 	return fmt.Sprintf("insert into %s (%s) values %s", qualifyTable(dialect, tableID), strings.Join(quoted, ", "), strings.Join(valueClauses, ", ")), args
 }
 
-func buildCreateMirrorDeleteTempTableQuery(dialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column) string {
+func buildCreateTempTableQuery(dialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column) string {
 	parts := make([]string, 0, len(columns))
 	for _, column := range columns {
 		parts = append(parts, dialect.quote(column.Name))
@@ -812,13 +919,21 @@ func buildCreateMirrorDeleteTempTableQuery(dialect dialect, targetTable schema.T
 	return fmt.Sprintf("create temporary table %s as select %s from %s where 1 = 0", dialect.quote(tempTableName), strings.Join(parts, ", "), qualifyTable(dialect, targetTable))
 }
 
-func buildCreateMirrorDeleteTempIndexQuery(dialect dialect, tempTableName string, columns []string) string {
+func buildCreateTempIndexQuery(dialect dialect, tempTableName string, columns []string) string {
 	quoted := make([]string, 0, len(columns))
 	for _, column := range columns {
 		quoted = append(quoted, dialect.quote(column))
 	}
 	indexName := dialect.quote(tempTableName + "_pk_idx")
 	return fmt.Sprintf("create index %s on %s (%s)", indexName, dialect.quote(tempTableName), strings.Join(quoted, ", "))
+}
+
+func buildCreateMirrorDeleteTempTableQuery(dialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column) string {
+	return buildCreateTempTableQuery(dialect, targetTable, tempTableName, columns)
+}
+
+func buildCreateMirrorDeleteTempIndexQuery(dialect dialect, tempTableName string, columns []string) string {
+	return buildCreateTempIndexQuery(dialect, tempTableName, columns)
 }
 
 func buildCountMirrorDeleteQuery(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string) string {
@@ -843,7 +958,80 @@ func buildMirrorDeleteJoinCondition(dialect dialect, targetAlias string, sourceA
 	return strings.Join(parts, " and ")
 }
 
+func buildCountMissingStageRowsQuery(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string) string {
+	return fmt.Sprintf("select count(*) from %s as source where not exists (select 1 from %s as target where %s)", dialect.quote(tempTableName), qualifyTable(dialect, targetTable), buildMirrorDeleteJoinCondition(dialect, "target", "source", primaryKey))
+}
+
+func buildInsertMissingStageRowsQuery(dialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column, primaryKey []string) string {
+	selectParts := make([]string, 0, len(columns))
+	quotedColumns := make([]string, 0, len(columns))
+	for _, column := range columns {
+		quotedColumns = append(quotedColumns, dialect.quote(column.Name))
+		selectParts = append(selectParts, fmt.Sprintf("%s.%s", dialect.quote("source"), dialect.quote(column.Name)))
+	}
+	return fmt.Sprintf("insert into %s (%s) select %s from %s as source where not exists (select 1 from %s as target where %s)", qualifyTable(dialect, targetTable), strings.Join(quotedColumns, ", "), strings.Join(selectParts, ", "), dialect.quote(tempTableName), qualifyTable(dialect, targetTable), buildMirrorDeleteJoinCondition(dialect, "target", "source", primaryKey))
+}
+
+func buildCountChangedStageRowsQuery(dialect dialect, targetTable schema.TableID, tempTableName string, updateColumns []schema.Column, primaryKey []string) string {
+	if len(updateColumns) == 0 {
+		return "select 0"
+	}
+	return fmt.Sprintf("select count(*) from %s as target join %s as source on %s where %s", qualifyTable(dialect, targetTable), dialect.quote(tempTableName), buildMirrorDeleteJoinCondition(dialect, "target", "source", primaryKey), buildColumnDifferenceCondition(dialect, "target", "source", updateColumns))
+}
+
+func buildUpdateChangedStageRowsQuery(dialect dialect, targetTable schema.TableID, tempTableName string, updateColumns []schema.Column, primaryKey []string) string {
+	if len(updateColumns) == 0 {
+		return ""
+	}
+	setParts := make([]string, 0, len(updateColumns))
+	for _, column := range updateColumns {
+		setParts = append(setParts, fmt.Sprintf("%s = %s.%s", dialect.quote(column.Name), dialect.quote("source"), dialect.quote(column.Name)))
+	}
+	joinCondition := buildMirrorDeleteJoinCondition(dialect, "target", "source", primaryKey)
+	differenceCondition := buildColumnDifferenceCondition(dialect, "target", "source", updateColumns)
+	switch dialect.(type) {
+	case mysqlDialect:
+		qualifiedTarget := qualifyTable(dialect, targetTable)
+		return fmt.Sprintf("update %s as target join %s as source on %s set %s where %s", qualifiedTarget, dialect.quote(tempTableName), joinCondition, strings.Join(prefixAliasedAssignments(dialect, "target", setParts), ", "), differenceCondition)
+	default:
+		qualifiedTarget := qualifyTable(dialect, targetTable)
+		return fmt.Sprintf("update %s as target set %s from %s as source where %s and %s", qualifiedTarget, strings.Join(setParts, ", "), dialect.quote(tempTableName), joinCondition, differenceCondition)
+	}
+}
+
+func buildColumnDifferenceCondition(dialect dialect, leftAlias string, rightAlias string, columns []schema.Column) string {
+	parts := make([]string, 0, len(columns))
+	for _, column := range columns {
+		left := fmt.Sprintf("%s.%s", dialect.quote(leftAlias), dialect.quote(column.Name))
+		right := fmt.Sprintf("%s.%s", dialect.quote(rightAlias), dialect.quote(column.Name))
+		switch dialect.(type) {
+		case mysqlDialect:
+			parts = append(parts, fmt.Sprintf("not (%s <=> %s)", left, right))
+		default:
+			parts = append(parts, fmt.Sprintf("%s is distinct from %s", left, right))
+		}
+	}
+	return strings.Join(parts, " or ")
+}
+
+func prefixAliasedAssignments(dialect dialect, alias string, assignments []string) []string {
+	qualified := make([]string, 0, len(assignments))
+	prefix := dialect.quote(alias) + "."
+	for _, assignment := range assignments {
+		qualified = append(qualified, prefix+assignment)
+	}
+	return qualified
+}
+
 func nextMirrorDeleteTempTableName(tableID schema.TableID) string {
+	return nextTempTableName("db_sync_delete", tableID)
+}
+
+func nextReplaceTempTableName(tableID schema.TableID) string {
+	return nextTempTableName("db_sync_replace", tableID)
+}
+
+func nextTempTableName(prefix string, tableID schema.TableID) string {
 	name := tableID.Name
 	if name == "" {
 		name = tableID.String()
@@ -863,16 +1051,70 @@ func nextMirrorDeleteTempTableName(tableID schema.TableID) string {
 	if clean == "" {
 		clean = "table"
 	}
-	return fmt.Sprintf("db_sync_delete_%s_%d", clean, atomic.AddUint64(&mirrorDeleteTempCounter, 1))
+	return fmt.Sprintf("%s_%s_%d", prefix, clean, atomic.AddUint64(&mirrorDeleteTempCounter, 1))
+}
+
+func resolveConfiguredTableIDs(available []schema.TableID, configured []string, modeName string) ([]schema.TableID, error) {
+	resolved := make([]schema.TableID, 0, len(configured))
+	seen := map[schema.TableID]struct{}{}
+	for _, value := range configured {
+		id, err := resolveConfiguredTableID(available, value, modeName)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		resolved = append(resolved, id)
+	}
+	return resolved, nil
+}
+
+func resolveConfiguredTableID(available []schema.TableID, value string, modeName string) (schema.TableID, error) {
+	id := schema.ParseTableID(value)
+	for _, candidate := range available {
+		if candidate == id {
+			return candidate, nil
+		}
+	}
+	if id.Schema != "" {
+		return schema.TableID{}, fmt.Errorf("%s table %q must be explicitly selected", modeName, value)
+	}
+	matches := make([]schema.TableID, 0)
+	for _, candidate := range available {
+		if candidate.Name == id.Name {
+			matches = append(matches, candidate)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return schema.TableID{}, fmt.Errorf("%s table %q must be explicitly selected", modeName, value)
+	case 1:
+		return matches[0], nil
+	default:
+		return schema.TableID{}, fmt.Errorf("%s table %q is ambiguous; qualify one of: %s", modeName, value, strings.Join(schema.SelectionStrings(matches), ", "))
+	}
 }
 
 func createMirrorDeleteTempTable(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column) error {
-	if _, err := targetDB.ExecContext(ctx, buildCreateMirrorDeleteTempTableQuery(targetDialect, targetTable, tempTableName, columns)); err != nil {
-		return fmt.Errorf("create mirror delete temp table for %s: %w", targetTable.String(), err)
+	return createTempTable(ctx, targetDB, targetDialect, targetTable, tempTableName, columns, columnNames(columns), "mirror delete")
+}
+
+func createReplaceTempTable(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column, primaryKey []string) error {
+	return createTempTable(ctx, targetDB, targetDialect, targetTable, tempTableName, columns, primaryKey, "replace")
+}
+
+func createTempTable(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column, indexColumns []string, purpose string) error {
+	if _, err := targetDB.ExecContext(ctx, buildCreateTempTableQuery(targetDialect, targetTable, tempTableName, columns)); err != nil {
+		return fmt.Errorf("create %s temp table for %s: %w", purpose, targetTable.String(), err)
 	}
-	if _, err := targetDB.ExecContext(ctx, buildCreateMirrorDeleteTempIndexQuery(targetDialect, tempTableName, columnNames(columns))); err != nil {
+	if len(indexColumns) == 0 {
+		return nil
+	}
+	if _, err := targetDB.ExecContext(ctx, buildCreateTempIndexQuery(targetDialect, tempTableName, indexColumns)); err != nil {
 		_ = dropMirrorDeleteTempTable(context.Background(), targetDB, targetDialect, tempTableName)
-		return fmt.Errorf("index mirror delete temp table for %s: %w", targetTable.String(), err)
+		return fmt.Errorf("index %s temp table for %s: %w", purpose, targetTable.String(), err)
 	}
 	return nil
 }
@@ -883,6 +1125,85 @@ func insertMirrorDeleteRows(ctx context.Context, targetDB sqlExecutor, targetDia
 		return fmt.Errorf("stage mirror delete rows in %s: %w", tempTableName, err)
 	}
 	return nil
+}
+
+func stageSourceRows(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, tempTableName string, columns []schema.Column) (int, error) {
+	rows, err := sourceDB.QueryContext(ctx, buildSelectQuery(sourceDialect, sourceTable.ID, columns, sourceTable.PrimaryKey.Columns))
+	if err != nil {
+		return 0, fmt.Errorf("query source table %s: %w", sourceTable.ID.String(), err)
+	}
+	defer rows.Close()
+	rowCount := 0
+	buffer := make([][]any, 0, deleteBatchSize)
+	for rows.Next() {
+		values, err := scanRowValues(rows, columns)
+		if err != nil {
+			return 0, fmt.Errorf("scan source row for %s: %w", sourceTable.ID.String(), err)
+		}
+		rowCount++
+		buffer = append(buffer, values)
+		if len(buffer) == deleteBatchSize {
+			if err := insertMirrorDeleteRows(ctx, targetDB, targetDialect, tempTableName, columns, buffer); err != nil {
+				return 0, err
+			}
+			buffer = buffer[:0]
+		}
+	}
+	if len(buffer) > 0 {
+		if err := insertMirrorDeleteRows(ctx, targetDB, targetDialect, tempTableName, columns, buffer); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate source rows for %s: %w", sourceTable.ID.String(), err)
+	}
+	return rowCount, nil
+}
+
+func countMissingStageRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string) (int, error) {
+	var count int
+	if err := targetDB.QueryRowContext(ctx, buildCountMissingStageRowsQuery(targetDialect, targetTable, tempTableName, primaryKey)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count missing rows for %s: %w", targetTable.String(), err)
+	}
+	return count, nil
+}
+
+func countChangedStageRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, updateColumns []schema.Column, primaryKey []string) (int, error) {
+	if len(updateColumns) == 0 {
+		return 0, nil
+	}
+	var count int
+	if err := targetDB.QueryRowContext(ctx, buildCountChangedStageRowsQuery(targetDialect, targetTable, tempTableName, updateColumns, primaryKey)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count changed rows for %s: %w", targetTable.String(), err)
+	}
+	return count, nil
+}
+
+func insertMissingStageRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, columns []schema.Column, primaryKey []string) (int, error) {
+	result, err := targetDB.ExecContext(ctx, buildInsertMissingStageRowsQuery(targetDialect, targetTable, tempTableName, columns, primaryKey))
+	if err != nil {
+		return 0, fmt.Errorf("insert missing rows into %s: %w", targetTable.String(), err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return int(inserted), nil
+}
+
+func updateChangedStageRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, updateColumns []schema.Column, primaryKey []string) (int, error) {
+	if len(updateColumns) == 0 {
+		return 0, nil
+	}
+	result, err := targetDB.ExecContext(ctx, buildUpdateChangedStageRowsQuery(targetDialect, targetTable, tempTableName, updateColumns, primaryKey))
+	if err != nil {
+		return 0, fmt.Errorf("update changed rows in %s: %w", targetTable.String(), err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return int(updated), nil
 }
 
 func countMirrorDeleteRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string) (int, error) {

@@ -23,6 +23,7 @@ func TestNormalizeProfileAppliesDefaultsWithoutName(t *testing.T) {
 	candidate.Target.Connection.ConnectionString = model.ConnectionString{Value: "dev:dev@tcp(localhost:3307)/target"}
 	candidate.Selection.Tables = []string{"public.orders", "public.orders", " public.order_items "}
 	candidate.Selection.ExcludedTables = []string{" public.logs ", "public.logs", "public.audit"}
+	candidate.Sync.MergeTables = []string{" public.orders ", "public.orders", " public.order_items "}
 
 	normalized, err := NormalizeProfile(candidate)
 	if err != nil {
@@ -45,6 +46,9 @@ func TestNormalizeProfileAppliesDefaultsWithoutName(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"public.logs", "public.audit"}, normalized.Selection.ExcludedTables); diff != "" {
 		t.Fatalf("excluded tables mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"public.orders", "public.order_items"}, normalized.Sync.MergeTables); diff != "" {
+		t.Fatalf("merge tables mismatch (-want +got):\n%s", diff)
 	}
 }
 

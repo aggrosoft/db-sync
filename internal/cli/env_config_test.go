@@ -22,6 +22,7 @@ func TestLoadProfileFromEnvironmentMatchesDotEnvContract(t *testing.T) {
 		"DB_SYNC_TABLES":          "users,orders",
 		"DB_SYNC_EXCLUDE_TABLES":  "logs, audit_log ",
 		"DB_SYNC_MIRROR_DELETE":   "true",
+		"DB_SYNC_MERGE_TABLES":    "users, audit_log",
 	})
 	if err != nil {
 		t.Fatalf("LoadProfileFromEnvironment() error = %v", err)
@@ -46,6 +47,9 @@ func TestLoadProfileFromEnvironmentMatchesDotEnvContract(t *testing.T) {
 	}
 	if !loaded.Sync.MirrorDelete {
 		t.Fatal("mirror delete = false, want true")
+	}
+	if got, want := strings.Join(loaded.Sync.MergeTables, ","), "users,audit_log"; got != want {
+		t.Fatalf("merge tables = %q, want %q", got, want)
 	}
 }
 

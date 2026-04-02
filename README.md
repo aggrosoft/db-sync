@@ -50,6 +50,7 @@ DB_SYNC_TARGET_ENGINE=mariadb
 DB_SYNC_TABLES=customer,customer_address,order,order_line_item
 DB_SYNC_EXCLUDE_TABLES=app,integration,plugin
 DB_SYNC_MIRROR_DELETE=false
+DB_SYNC_MERGE_TABLES=
 ```
 
 ## CLI Usage
@@ -105,7 +106,7 @@ Options:
 
 ## Sync Semantics
 
-- Explicitly selected tables from `DB_SYNC_TABLES`: insert missing rows and update existing target rows when non-primary-key columns differ
+- Explicitly selected tables from `DB_SYNC_TABLES`: source-authoritative by default; rows missing from source are removed, missing target rows are inserted, and changed rows are updated
 - Implicitly required relation tables: insert missing rows only, no updates
 - `DB_SYNC_EXCLUDE_TABLES`: excludes tables hard, even if they would otherwise be pulled in as implicit dependencies
 
@@ -113,9 +114,16 @@ For MySQL and MariaDB, `run` always disables foreign key checks temporarily on t
 
 ### `DB_SYNC_MIRROR_DELETE=true`
 
-- Deletes target rows that no longer exist in the source only for explicitly selected tables
+- Deletes target rows that no longer exist in the source only for explicit merge tables
 - Does not delete implicitly required relation tables
-- Runs deletions before inserts and updates, in reverse dependency order for explicit tables, to reduce foreign key and unique key conflicts
+- Runs deletions before inserts and updates, in reverse dependency order for explicit merge tables, to reduce foreign key and unique key conflicts
+
+### `DB_SYNC_MERGE_TABLES=table_a,table_b`
+
+- Applies only to explicitly selected tables
+- Opts the configured tables out of source-authoritative replace mode and back into merge semantics
+- Keeps target-only rows unless `DB_SYNC_MIRROR_DELETE=true`
+- Updates existing target rows when non-primary-key columns differ and inserts missing rows from source
 
 ## Current Limitations
 

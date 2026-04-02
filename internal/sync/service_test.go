@@ -130,3 +130,32 @@ func TestBuildCreateMirrorDeleteTempTableQuery(t *testing.T) {
 		t.Fatalf("query = %q, want %q", query, want)
 	}
 }
+
+func TestResolveConfiguredTableIDsRequiresExplicitSelection(t *testing.T) {
+	available := []schema.TableID{{Name: "orders"}, {Name: "users"}}
+	resolved, err := resolveConfiguredTableIDs(available, []string{"orders"}, "merge")
+	if err != nil {
+		t.Fatalf("resolveConfiguredTableIDs() error = %v", err)
+	}
+	if len(resolved) != 1 || resolved[0] != (schema.TableID{Name: "orders"}) {
+		t.Fatalf("resolved = %#v, want orders", resolved)
+	}
+	if _, err := resolveConfiguredTableIDs(available, []string{"payments"}, "merge"); err == nil {
+		t.Fatal("resolveConfiguredTableIDs() error = nil, want explicit-selection error")
+	}
+}
+
+func TestBuildReplaceQueries(t *testing.T) {
+	if got := buildCountMissingStageRowsQuery(mysqlDialect{}, schema.TableID{Name: "orders"}, "tmp_orders", []string{"id"}); got != "select count(*) from `tmp_orders` as source where not exists (select 1 from `orders` as target where `target`.`id` = `source`.`id`)" {
+		t.Fatalf("buildCountMissingStageRowsQuery() = %q, want mysql missing-row count query", got)
+	}
+	if got := buildInsertMissingStageRowsQuery(postgresDialect{}, schema.TableID{Schema: "public", Name: "orders"}, "tmp_orders", []schema.Column{{Name: "id"}, {Name: "payload"}}, []string{"id"}); got != "insert into \"public\".\"orders\" (\"id\", \"payload\") select \"source\".\"id\", \"source\".\"payload\" from \"tmp_orders\" as source where not exists (select 1 from \"public\".\"orders\" as target where \"target\".\"id\" = \"source\".\"id\")" {
+		t.Fatalf("buildInsertMissingStageRowsQuery() = %q, want postgres insert-missing query", got)
+	}
+	if got := buildCountChangedStageRowsQuery(postgresDialect{}, schema.TableID{Schema: "public", Name: "orders"}, "tmp_orders", []schema.Column{{Name: "payload"}}, []string{"id"}); got != "select count(*) from \"public\".\"orders\" as target join \"tmp_orders\" as source on \"target\".\"id\" = \"source\".\"id\" where \"target\".\"payload\" is distinct from \"source\".\"payload\"" {
+		t.Fatalf("buildCountChangedStageRowsQuery() = %q, want postgres changed-row count query", got)
+	}
+	if got := buildUpdateChangedStageRowsQuery(mysqlDialect{}, schema.TableID{Name: "orders"}, "tmp_orders", []schema.Column{{Name: "payload"}, {Name: "status"}}, []string{"id"}); got != "update `orders` as target join `tmp_orders` as source on `target`.`id` = `source`.`id` set `target`.`payload` = `source`.`payload`, `target`.`status` = `source`.`status` where not (`target`.`payload` <=> `source`.`payload`) or not (`target`.`status` <=> `source`.`status`)" {
+		t.Fatalf("buildUpdateChangedStageRowsQuery() = %q, want mysql update-changed query", got)
+	}
+}
