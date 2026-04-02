@@ -108,7 +108,7 @@ Options:
 
 - Explicitly selected tables from `DB_SYNC_TABLES`: source-authoritative by default; rows missing from source are removed, missing target rows are inserted, and changed rows are updated
 - Implicitly required relation tables: insert missing rows only, no updates
-- `DB_SYNC_EXCLUDE_TABLES`: excludes tables hard, even if they would otherwise be pulled in as implicit dependencies
+- `DB_SYNC_EXCLUDE_TABLES`: excludes tables hard, even if they would otherwise be pulled in as implicit dependencies; references into excluded tables are preserved from the target when possible, otherwise nullable foreign keys are written as `NULL`
 
 For MySQL and MariaDB, `run` always disables foreign key checks temporarily on the pinned target session during the write phase. This is necessary because insert order alone cannot reliably resolve cyclic or mutually nested references between tables. Re-enabling foreign key checks does not retroactively validate rows that were already written.
 

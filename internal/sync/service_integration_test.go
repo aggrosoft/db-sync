@@ -414,6 +414,82 @@ func TestRunProfileIntegrationMergeTablesKeepTargetOnlyRows(t *testing.T) {
 	assertStringRows(t, targetDB, `select cast(id as char), payload from entries order by id`, [][]string{{"1", "alpha"}, {"2", "beta"}, {"9", "ghost"}})
 }
 
+func TestRunProfileIntegrationExcludedReferencePreservesOrNullsCMSLinks(t *testing.T) {
+	ctx := context.Background()
+	sourceContainer := testkit.StartMySQLContainer(ctx, t)
+	defer sourceContainer.Cleanup()
+	targetContainer := testkit.StartMySQLContainer(ctx, t)
+	defer targetContainer.Cleanup()
+
+	sourceDSN := strings.ReplaceAll(sourceContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	targetDSN := strings.ReplaceAll(targetContainer.DSN, "${MYSQL_PASSWORD}", "app-secret")
+	sourceDB := openMySQLForTest(t, sourceDSN)
+	defer sourceDB.Close()
+	targetDB := openMySQLForTest(t, targetDSN)
+	defer targetDB.Close()
+
+	applyStatements(t, sourceDB,
+		`create table cms_page (id int primary key, name varchar(255) not null)`,
+		`create table product (id int primary key, cms_page_id int null, name varchar(255) not null, constraint product_cms_page_fk foreign key (cms_page_id) references cms_page(id))`,
+		`insert into cms_page (id, name) values (1, 'source page')`,
+		`insert into product (id, cms_page_id, name) values (10, 1, 'updated source product'), (11, 1, 'new source product')`,
+	)
+	applyStatements(t, targetDB,
+		`create table cms_page (id int primary key, name varchar(255) not null)`,
+		`create table product (id int primary key, cms_page_id int null, name varchar(255) not null, constraint product_cms_page_fk foreign key (cms_page_id) references cms_page(id))`,
+		`insert into cms_page (id, name) values (2, 'target page')`,
+		`insert into product (id, cms_page_id, name) values (10, 2, 'old target product')`,
+	)
+
+	adapter := mysqladapter.NewAdapter()
+	sourceSnapshot, err := adapter.DiscoverSourceSchema(ctx, sourceDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverSourceSchema() error = %v", err)
+	}
+	targetSnapshot, err := adapter.DiscoverTargetSchema(ctx, targetDSN, model.EngineMySQL)
+	if err != nil {
+		t.Fatalf("DiscoverTargetSchema() error = %v", err)
+	}
+
+	candidate := model.DefaultProfile("integration")
+	candidate.Source.Engine = model.EngineMySQL
+	candidate.Source.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Source.Connection.ConnectionString.Value = sourceDSN
+	candidate.Target.Engine = model.EngineMySQL
+	candidate.Target.Connection.Mode = model.ConnectionModeConnectionString
+	candidate.Target.Connection.ConnectionString.Value = targetDSN
+	candidate.Selection.Tables = []string{"product"}
+	candidate.Selection.ExcludedTables = []string{"cms_page"}
+
+	preview, err := schema.PreviewSelection(schema.BuildDependencyGraph(sourceSnapshot), candidate.Selection.Tables, candidate.Selection.ExcludedTables)
+	if err != nil {
+		t.Fatalf("PreviewSelection() error = %v", err)
+	}
+	analysis := integrationAnalysis{
+		preview: preview,
+		discovery: schema.DiscoveryReport{
+			Source: schema.EndpointDiscovery{Role: "source", Engine: model.EngineMySQL, Snapshot: sourceSnapshot},
+			Target: schema.EndpointDiscovery{Role: "target", Engine: model.EngineMySQL, Snapshot: targetSnapshot},
+		},
+		drift: schema.CompareSnapshots(filterSnapshot(sourceSnapshot, preview.FinalTables), filterSnapshot(targetSnapshot, preview.FinalTables)),
+	}
+
+	service := NewService(func() map[string]string { return map[string]string{} })
+	report, err := service.RunProfile(ctx, candidate, analysis, false, nil)
+	if err != nil {
+		t.Fatalf("RunProfile() error = %v", err)
+	}
+	if report.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", report.InsertedRows)
+	}
+	if report.UpdatedRows != 1 {
+		t.Fatalf("UpdatedRows = %d, want 1", report.UpdatedRows)
+	}
+
+	assertStringRows(t, targetDB, `select cast(id as char), coalesce(cast(cms_page_id as char), ''), name from product order by id`, [][]string{{"10", "2", "updated source product"}, {"11", "", "new source product"}})
+	assertStringRows(t, targetDB, `select cast(id as char), name from cms_page order by id`, [][]string{{"2", "target page"}})
+}
+
 func TestRunProfileIntegrationSkipsNonPrimaryAutoIncrementColumns(t *testing.T) {
 	ctx := context.Background()
 	sourceContainer := testkit.StartMySQLContainer(ctx, t)

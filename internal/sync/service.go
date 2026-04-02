@@ -90,6 +90,11 @@ type deletePlan struct {
 	candidateCount int
 }
 
+type excludedReferenceRule struct {
+	foreignKey schema.ForeignKey
+	nullable   bool
+}
+
 type syncActionType string
 
 const (
@@ -172,6 +177,11 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 		return report, err
 	}
 	mergeSet := tableSet(mergeTables)
+	excludedTables, err := resolveAvailableTableIDs(snapshotTableIDs(discovery.Source.Snapshot), candidate.Selection.ExcludedTables, "excluded")
+	if err != nil {
+		return report, err
+	}
+	excludedSet := tableSet(excludedTables)
 	explicitTables := make([]schema.TableID, 0, len(preview.FinalTables))
 	for _, tableID := range preview.FinalTables {
 		if _, ok := explicitSet[tableID]; ok {
@@ -275,9 +285,9 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 		}
 		state, err := tableState{}, error(nil)
 		if scope == "explicit" && !mergeMode {
-			state, err = replaceTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, scope, dryRun, enforceSelfReferenceOrdering)
+			state, err = replaceTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, excludedSet, scope, dryRun, enforceSelfReferenceOrdering)
 		} else {
-			state, err = syncTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, mergeMode, scope, dryRun, enforceSelfReferenceOrdering)
+			state, err = syncTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, excludedSet, mergeMode, scope, dryRun, enforceSelfReferenceOrdering)
 		}
 		if err != nil {
 			if tableTx != nil {
@@ -385,7 +395,7 @@ func inspectTableForDelete(ctx context.Context, sourceDB *sql.DB, sourceDialect 
 	return deletePlan{table: targetTable, primaryKey: append([]string(nil), targetTable.PrimaryKey.Columns...), tempTableName: tempTableName, candidateCount: candidateCount}, nil
 }
 
-func replaceTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
+func replaceTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, excludedSet map[schema.TableID]struct{}, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
 	if len(sourceTable.PrimaryKey.Columns) == 0 {
 		return tableState{}, fmt.Errorf("table %s has no primary key; sync requires primary keys", sourceTable.ID.String())
 	}
@@ -403,6 +413,9 @@ func replaceTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, 
 
 	sourceRowCount, err := stageSourceRows(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, tempTableName, columns)
 	if err != nil {
+		return tableState{}, err
+	}
+	if err := applyExcludedReferencePoliciesToTempTable(ctx, targetDB, targetDialect, sourceTable, targetTable, tempTableName, columns, excludedSet); err != nil {
 		return tableState{}, err
 	}
 	missingRows, err := countMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns)
@@ -463,7 +476,7 @@ func replaceTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, 
 	return state, nil
 }
 
-func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
+func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, excludedSet map[schema.TableID]struct{}, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
 	if len(sourceTable.PrimaryKey.Columns) == 0 {
 		return tableState{}, fmt.Errorf("table %s has no primary key; sync requires primary keys", sourceTable.ID.String())
 	}
@@ -482,12 +495,12 @@ func syncTable(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sou
 	}
 	selfReferences := selfReferencingForeignKeys(sourceTable, columns)
 	if enforceSelfReferenceOrdering && len(selfReferences) > 0 {
-		return syncTableInMemory(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, selfReferences, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
+		return syncTableInMemory(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, selfReferences, excludedSet, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
 	}
-	return syncTableViaStage(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, allowUpdate, scope, dryRun)
+	return syncTableViaStage(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, targetTable, columns, excludedSet, allowUpdate, scope, dryRun)
 }
 
-func syncTableViaStage(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, allowUpdate bool, scope string, dryRun bool) (tableState, error) {
+func syncTableViaStage(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, excludedSet map[schema.TableID]struct{}, allowUpdate bool, scope string, dryRun bool) (tableState, error) {
 	tempTableName := nextSyncTempTableName(targetTable.ID)
 	if err := createReplaceTempTable(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, columns, sourceTable.PrimaryKey.Columns); err != nil {
 		return tableState{}, err
@@ -498,6 +511,9 @@ func syncTableViaStage(ctx context.Context, sourceDB *sql.DB, sourceDialect dial
 
 	sourceRowCount, err := stageSourceRows(ctx, sourceDB, sourceDialect, sourceTable, targetDB, targetDialect, tempTableName, columns)
 	if err != nil {
+		return tableState{}, err
+	}
+	if err := applyExcludedReferencePoliciesToTempTable(ctx, targetDB, targetDialect, sourceTable, targetTable, tempTableName, columns, excludedSet); err != nil {
 		return tableState{}, err
 	}
 	missingRows, err := countMissingStageRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns)
@@ -551,11 +567,13 @@ func syncTableViaStage(ctx context.Context, sourceDB *sql.DB, sourceDialect dial
 	return state, nil
 }
 
-func syncTableInMemory(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, selfReferences []schema.ForeignKey, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
+func syncTableInMemory(ctx context.Context, sourceDB *sql.DB, sourceDialect dialect, sourceTable schema.Table, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, selfReferences []schema.ForeignKey, excludedSet map[schema.TableID]struct{}, allowUpdate bool, scope string, dryRun bool, enforceSelfReferenceOrdering bool) (tableState, error) {
 	targetRows, err := loadTargetRows(ctx, targetDB, targetDialect, targetTable, columns)
 	if err != nil {
 		return tableState{}, err
 	}
+	excludedRules := excludedReferenceRules(sourceTable, columns, excludedSet)
+	excludedExistenceCache := map[string]bool{}
 	rows, err := sourceDB.QueryContext(ctx, buildSelectQuery(sourceDialect, sourceTable.ID, columns, sourceTable.PrimaryKey.Columns))
 	if err != nil {
 		return tableState{}, fmt.Errorf("query source table %s: %w", sourceTable.ID.String(), err)
@@ -601,8 +619,11 @@ func syncTableInMemory(ctx context.Context, sourceDB *sql.DB, sourceDialect dial
 		if err != nil {
 			return tableState{}, fmt.Errorf("encode primary key for %s: %w", sourceTable.ID.String(), err)
 		}
-		state.sourceSeen[key] = struct{}{}
 		targetValues, exists := targetRows[key]
+		if err := applyExcludedReferencePoliciesInMemory(ctx, targetDB, targetDialect, targetTable, columns, values, targetValues, exists, excludedRules, excludedExistenceCache); err != nil {
+			return tableState{}, err
+		}
+		state.sourceSeen[key] = struct{}{}
 		if !exists {
 			state.report.MissingRows++
 			if dryRun {
@@ -1104,6 +1125,326 @@ func nextReplaceTempTableName(tableID schema.TableID) string {
 
 func nextSyncTempTableName(tableID schema.TableID) string {
 	return nextTempTableName("db_sync_sync", tableID)
+}
+
+func snapshotTableIDs(snapshot schema.Snapshot) []schema.TableID {
+	result := make([]schema.TableID, 0, len(snapshot.Tables))
+	for _, table := range snapshot.Tables {
+		result = append(result, table.ID)
+	}
+	return result
+}
+
+func resolveAvailableTableIDs(available []schema.TableID, configured []string, modeName string) ([]schema.TableID, error) {
+	resolved := make([]schema.TableID, 0, len(configured))
+	seen := map[schema.TableID]struct{}{}
+	for _, value := range configured {
+		id, err := resolveAvailableTableID(available, value, modeName)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		resolved = append(resolved, id)
+	}
+	return resolved, nil
+}
+
+func resolveAvailableTableID(available []schema.TableID, value string, modeName string) (schema.TableID, error) {
+	id := schema.ParseTableID(value)
+	for _, candidate := range available {
+		if candidate == id {
+			return candidate, nil
+		}
+	}
+	if id.Schema != "" {
+		return schema.TableID{}, fmt.Errorf("unknown %s table %q", modeName, value)
+	}
+	matches := make([]schema.TableID, 0)
+	for _, candidate := range available {
+		if candidate.Name == id.Name {
+			matches = append(matches, candidate)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return schema.TableID{}, fmt.Errorf("unknown %s table %q", modeName, value)
+	case 1:
+		return matches[0], nil
+	default:
+		return schema.TableID{}, fmt.Errorf("%s table %q is ambiguous; qualify one of: %s", modeName, value, strings.Join(schema.SelectionStrings(matches), ", "))
+	}
+}
+
+func excludedReferenceRules(table schema.Table, columns []schema.Column, excludedSet map[schema.TableID]struct{}) []excludedReferenceRule {
+	if len(excludedSet) == 0 {
+		return nil
+	}
+	columnByName := make(map[string]schema.Column, len(columns))
+	for _, column := range columns {
+		columnByName[column.Name] = column
+	}
+	rules := make([]excludedReferenceRule, 0)
+	for _, foreignKey := range table.ForeignKeys {
+		if _, excluded := excludedSet[foreignKey.ReferencedTable]; !excluded {
+			continue
+		}
+		supported := true
+		nullable := true
+		for _, name := range foreignKey.Columns {
+			column, ok := columnByName[name]
+			if !ok {
+				supported = false
+				break
+			}
+			if !column.Nullable {
+				nullable = false
+			}
+		}
+		if !supported {
+			continue
+		}
+		rules = append(rules, excludedReferenceRule{foreignKey: foreignKey, nullable: nullable})
+	}
+	return rules
+}
+
+func applyExcludedReferencePoliciesToTempTable(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, sourceTable schema.Table, targetTable schema.Table, tempTableName string, columns []schema.Column, excludedSet map[schema.TableID]struct{}) error {
+	rules := excludedReferenceRules(sourceTable, columns, excludedSet)
+	for _, rule := range rules {
+		if err := preserveExcludedReferenceValues(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns, rule); err != nil {
+			return err
+		}
+		if rule.nullable {
+			if err := nullExcludedReferenceValues(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns, rule); err != nil {
+				return err
+			}
+			continue
+		}
+		invalidRows, err := countInvalidExcludedReferenceRows(ctx, targetDB, targetDialect, targetTable.ID, tempTableName, sourceTable.PrimaryKey.Columns, rule)
+		if err != nil {
+			return err
+		}
+		if invalidRows > 0 {
+			return fmt.Errorf("table %s has %d row(s) referencing excluded table %s through non-nullable foreign key %s", targetTable.ID.String(), invalidRows, rule.foreignKey.ReferencedTable.String(), rule.foreignKey.Name)
+		}
+	}
+	return nil
+}
+
+func preserveExcludedReferenceValues(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, rule excludedReferenceRule) error {
+	query := buildPreserveExcludedReferenceQuery(targetDialect, targetTable, tempTableName, primaryKey, rule.foreignKey)
+	if _, err := targetDB.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("preserve references to excluded table %s for %s: %w", rule.foreignKey.ReferencedTable.String(), targetTable.String(), err)
+	}
+	return nil
+}
+
+func nullExcludedReferenceValues(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, rule excludedReferenceRule) error {
+	query := buildNullExcludedReferenceQuery(targetDialect, targetTable, tempTableName, primaryKey, rule.foreignKey)
+	if _, err := targetDB.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("null references to excluded table %s for %s: %w", rule.foreignKey.ReferencedTable.String(), targetTable.String(), err)
+	}
+	return nil
+}
+
+func countInvalidExcludedReferenceRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, rule excludedReferenceRule) (int, error) {
+	var count int
+	query := buildCountInvalidExcludedReferenceQuery(targetDialect, targetTable, tempTableName, primaryKey, rule.foreignKey)
+	if err := targetDB.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count invalid references to excluded table %s for %s: %w", rule.foreignKey.ReferencedTable.String(), targetTable.String(), err)
+	}
+	return count, nil
+}
+
+func applyExcludedReferencePoliciesInMemory(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, targetTable schema.Table, columns []schema.Column, values []any, targetValues []any, targetExists bool, rules []excludedReferenceRule, cache map[string]bool) error {
+	for _, rule := range rules {
+		localValues, present, err := foreignKeyLocalValues(values, columns, rule.foreignKey)
+		if err != nil {
+			return err
+		}
+		if !present {
+			continue
+		}
+		exists, err := excludedReferenceExists(ctx, targetDB, targetDialect, rule.foreignKey, localValues, cache)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if targetExists {
+			copyForeignKeyValues(values, targetValues, columns, rule.foreignKey.Columns)
+			continue
+		}
+		if rule.nullable {
+			setForeignKeyValuesToNull(values, columns, rule.foreignKey.Columns)
+			continue
+		}
+		return fmt.Errorf("table %s references excluded table %s through non-nullable foreign key %s", targetTable.ID.String(), rule.foreignKey.ReferencedTable.String(), rule.foreignKey.Name)
+	}
+	return nil
+}
+
+func foreignKeyLocalValues(values []any, columns []schema.Column, foreignKey schema.ForeignKey) ([]any, bool, error) {
+	indexByName := make(map[string]int, len(columns))
+	for index, column := range columns {
+		indexByName[column.Name] = index
+	}
+	result := make([]any, 0, len(foreignKey.Columns))
+	for _, name := range foreignKey.Columns {
+		index, ok := indexByName[name]
+		if !ok {
+			return nil, false, fmt.Errorf("foreign key column %s is missing from selected values", name)
+		}
+		if values[index] == nil {
+			return nil, false, nil
+		}
+		result = append(result, values[index])
+	}
+	return result, true, nil
+}
+
+func copyForeignKeyValues(dst []any, src []any, columns []schema.Column, foreignKeyColumns []string) {
+	indexByName := make(map[string]int, len(columns))
+	for index, column := range columns {
+		indexByName[column.Name] = index
+	}
+	for _, name := range foreignKeyColumns {
+		index, ok := indexByName[name]
+		if !ok {
+			continue
+		}
+		dst[index] = src[index]
+	}
+}
+
+func setForeignKeyValuesToNull(values []any, columns []schema.Column, foreignKeyColumns []string) {
+	indexByName := make(map[string]int, len(columns))
+	for index, column := range columns {
+		indexByName[column.Name] = index
+	}
+	for _, name := range foreignKeyColumns {
+		index, ok := indexByName[name]
+		if !ok {
+			continue
+		}
+		values[index] = nil
+	}
+}
+
+func excludedReferenceExists(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, foreignKey schema.ForeignKey, localValues []any, cache map[string]bool) (bool, error) {
+	cacheKey := foreignKey.ReferencedTable.String() + ":" + encodeCacheValues(localValues)
+	if exists, ok := cache[cacheKey]; ok {
+		return exists, nil
+	}
+	query := buildExcludedReferenceExistsQuery(targetDialect, foreignKey)
+	row := targetDB.QueryRowContext(ctx, query, localValues...)
+	var marker int
+	if err := row.Scan(&marker); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			cache[cacheKey] = false
+			return false, nil
+		}
+		return false, fmt.Errorf("query excluded reference %s: %w", foreignKey.ReferencedTable.String(), err)
+	}
+	cache[cacheKey] = true
+	return true, nil
+}
+
+func encodeCacheValues(values []any) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, normalizeKeyPart(value))
+	}
+	return strings.Join(parts, "|")
+}
+
+func buildExcludedReferenceExistsQuery(dialect dialect, foreignKey schema.ForeignKey) string {
+	parts := make([]string, 0, len(foreignKey.ReferencedColumns))
+	for index, column := range foreignKey.ReferencedColumns {
+		parts = append(parts, fmt.Sprintf("%s = %s", dialect.quote(column), dialect.placeholder(index+1)))
+	}
+	return fmt.Sprintf("select 1 from %s where %s limit 1", qualifyTable(dialect, foreignKey.ReferencedTable), strings.Join(parts, " and "))
+}
+
+func buildPreserveExcludedReferenceQuery(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, foreignKey schema.ForeignKey) string {
+	assignments := buildAliasedAssignmentList(dialect, "source", "current", foreignKey.Columns)
+	where := buildExcludedReferenceMissingCondition(dialect, targetTable, tempTableName, primaryKey, foreignKey)
+	switch dialect.(type) {
+	case mysqlDialect:
+		return fmt.Sprintf("update %s as source join %s as current on %s set %s where %s", dialect.quote(tempTableName), qualifyTable(dialect, targetTable), buildTableJoinCondition(dialect, "source", "current", primaryKey), strings.Join(assignments, ", "), where)
+	default:
+		return fmt.Sprintf("update %s as source set %s from %s as current where %s and %s", dialect.quote(tempTableName), strings.Join(stripAssignmentLeftHand(assignments), ", "), qualifyTable(dialect, targetTable), buildTableJoinCondition(dialect, "source", "current", primaryKey), where)
+	}
+}
+
+func buildNullExcludedReferenceQuery(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, foreignKey schema.ForeignKey) string {
+	assignments := make([]string, 0, len(foreignKey.Columns))
+	for _, column := range foreignKey.Columns {
+		assignments = append(assignments, fmt.Sprintf("%s = NULL", dialect.quote(column)))
+	}
+	where := buildExcludedReferenceMissingCondition(dialect, targetTable, tempTableName, primaryKey, foreignKey) + " and not exists (select 1 from " + qualifyTable(dialect, targetTable) + " as current where " + buildTableJoinCondition(dialect, "current", "source", primaryKey) + ")"
+	return fmt.Sprintf("update %s as source set %s where %s", dialect.quote(tempTableName), strings.Join(assignments, ", "), where)
+}
+
+func buildCountInvalidExcludedReferenceQuery(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, foreignKey schema.ForeignKey) string {
+	where := buildExcludedReferenceMissingCondition(dialect, targetTable, tempTableName, primaryKey, foreignKey) + " and not exists (select 1 from " + qualifyTable(dialect, targetTable) + " as current where " + buildTableJoinCondition(dialect, "current", "source", primaryKey) + ")"
+	return fmt.Sprintf("select count(*) from %s as source where %s", dialect.quote(tempTableName), where)
+}
+
+func buildExcludedReferenceMissingCondition(dialect dialect, targetTable schema.TableID, tempTableName string, primaryKey []string, foreignKey schema.ForeignKey) string {
+	_ = targetTable
+	_ = tempTableName
+	parts := []string{buildColumnsNotNullCondition(dialect, "source", foreignKey.Columns)}
+	parts = append(parts, fmt.Sprintf("not exists (select 1 from %s as excluded where %s)", qualifyTable(dialect, foreignKey.ReferencedTable), buildForeignKeyJoinCondition(dialect, "source", "excluded", foreignKey)))
+	return strings.Join(parts, " and ")
+}
+
+func buildColumnsNotNullCondition(dialect dialect, alias string, columns []string) string {
+	parts := make([]string, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, fmt.Sprintf("%s.%s is not null", dialect.quote(alias), dialect.quote(column)))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func buildForeignKeyJoinCondition(dialect dialect, localAlias string, referencedAlias string, foreignKey schema.ForeignKey) string {
+	parts := make([]string, 0, len(foreignKey.Columns))
+	for index, column := range foreignKey.Columns {
+		parts = append(parts, fmt.Sprintf("%s.%s = %s.%s", dialect.quote(localAlias), dialect.quote(column), dialect.quote(referencedAlias), dialect.quote(foreignKey.ReferencedColumns[index])))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func buildTableJoinCondition(dialect dialect, leftAlias string, rightAlias string, columns []string) string {
+	parts := make([]string, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, fmt.Sprintf("%s.%s = %s.%s", dialect.quote(leftAlias), dialect.quote(column), dialect.quote(rightAlias), dialect.quote(column)))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func buildAliasedAssignmentList(dialect dialect, leftAlias string, rightAlias string, columns []string) []string {
+	assignments := make([]string, 0, len(columns))
+	for _, column := range columns {
+		assignments = append(assignments, fmt.Sprintf("%s.%s = %s.%s", dialect.quote(leftAlias), dialect.quote(column), dialect.quote(rightAlias), dialect.quote(column)))
+	}
+	return assignments
+}
+
+func stripAssignmentLeftHand(assignments []string) []string {
+	result := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		parts := strings.SplitN(assignment, " = ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		result = append(result, parts[0][strings.LastIndex(parts[0], ".")+1:]+" = "+parts[1])
+	}
+	return result
 }
 
 func nextTempTableName(prefix string, tableID schema.TableID) string {
