@@ -174,6 +174,7 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 		}
 	}
 	deletePlans := make(map[schema.TableID]deletePlan, len(preview.ExplicitIncludes))
+	deleteCounts := make(map[schema.TableID]int, len(preview.ExplicitIncludes))
 	if candidate.Sync.MirrorDelete {
 		for index, tableID := range explicitTables {
 			if progress != nil {
@@ -192,6 +193,7 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 				return report, err
 			}
 			deletePlans[tableID] = plan
+			deleteCounts[tableID] = plan.candidateCount
 		}
 		defer func() {
 			for _, plan := range deletePlans {
@@ -208,10 +210,28 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 				if progress != nil {
 					progress(ProgressUpdate{Phase: "applying mirror deletes", Detail: fmt.Sprintf("%s, %d row(s)", displaySyncTable(tableID, "explicit"), plan.candidateCount), Completed: len(explicitTables) - index, Total: len(explicitTables), TableID: tableID, Scope: "explicit", DryRun: dryRun})
 				}
-				if _, err := deleteMissingRows(ctx, targetExecutor, targetDialect, plan, false); err != nil {
+				tx, err := targetConn.BeginTx(ctx, nil)
+				if err != nil {
+					return report, fmt.Errorf("begin mirror delete transaction for %s: %w", tableID.String(), err)
+				}
+				deletedRows, err := deleteMissingRows(ctx, tx, targetDialect, plan, false)
+				if err != nil {
+					_ = tx.Rollback()
 					return report, err
 				}
+				if err := tx.Commit(); err != nil {
+					return report, fmt.Errorf("commit mirror delete transaction for %s: %w", tableID.String(), err)
+				}
+				if deletedRows == 0 && plan.candidateCount > 0 {
+					return report, fmt.Errorf("table %s deleted 0 rows but expected %d", tableID.String(), plan.candidateCount)
+				}
+				if deletedRows > 0 {
+					deleteCounts[tableID] = deletedRows
+				}
 				delete(deletePlans, tableID)
+				if err := dropMirrorDeleteTempTable(ctx, targetExecutor, targetDialect, plan.tempTableName); err != nil {
+					return report, fmt.Errorf("drop mirror delete temp table for %s: %w", tableID.String(), err)
+				}
 			}
 		}
 	}
@@ -236,12 +256,29 @@ func (service *Service) RunProfile(ctx context.Context, candidate model.Profile,
 		if progress != nil {
 			progress(ProgressUpdate{Phase: "syncing table", Detail: displaySyncTable(tableID, scope), Completed: index + 1, Total: totalTables, TableID: tableID, Scope: scope, DryRun: dryRun})
 		}
-		state, err := syncTable(ctx, sourceDB, sourceDialect, sourceTable, targetExecutor, targetDialect, targetTable, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
+		tableExecutor := targetExecutor
+		var tableTx *sql.Tx
+		if !dryRun {
+			tableTx, err = targetConn.BeginTx(ctx, nil)
+			if err != nil {
+				return report, fmt.Errorf("begin sync transaction for %s: %w", tableID.String(), err)
+			}
+			tableExecutor = tableTx
+		}
+		state, err := syncTable(ctx, sourceDB, sourceDialect, sourceTable, tableExecutor, targetDialect, targetTable, allowUpdate, scope, dryRun, enforceSelfReferenceOrdering)
 		if err != nil {
+			if tableTx != nil {
+				_ = tableTx.Rollback()
+			}
 			return report, err
 		}
-		if deletePlan, ok := deletePlans[tableID]; ok {
-			state.report.DeletedRows = deletePlan.candidateCount
+		if tableTx != nil {
+			if err := tableTx.Commit(); err != nil {
+				return report, fmt.Errorf("commit sync transaction for %s: %w", tableID.String(), err)
+			}
+		}
+		if deletedRows, ok := deleteCounts[tableID]; ok {
+			state.report.DeletedRows = deletedRows
 		}
 		states = append(states, state)
 		if progress != nil {
