@@ -95,7 +95,7 @@ type syncActionType string
 const (
 	syncActionInsert syncActionType = "insert"
 	syncActionUpdate syncActionType = "update"
-	deleteBatchSize               = 500
+	deleteBatchSize                 = 500
 )
 
 var mirrorDeleteTempCounter uint64
@@ -513,7 +513,6 @@ func loadTargetRows(ctx context.Context, db sqlExecutor, dialect dialect, table 
 	}
 	return valuesByKey, nil
 }
-
 
 func deleteMissingRows(ctx context.Context, targetDB sqlExecutor, targetDialect dialect, plan deletePlan, dryRun bool) (int, error) {
 	if plan.candidateCount == 0 {
